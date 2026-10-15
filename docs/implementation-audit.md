@@ -1,0 +1,83 @@
+# Implementation audit
+
+Recorded 15 October 2026 from the repository root on Windows. Node v24.12.0, npm 11.6.2. Docker is not installed, so `docker-compose.yml` was not started. Database checks that ran used PostgreSQL through PGlite. This is not a deployment record and it does not claim production readiness.
+
+## Passing checks
+
+| Command                         | Result                                                                                                                                                                                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm ls --depth=0 --workspaces` | Exit 0. `@careflow/api`, `@careflow/web`, `@careflow/shared`, and `@careflow/e2e` resolve inside this repository. No missing workspace links were reported.                                                                                                  |
+| `npm run typecheck`             | Exit 0. Shared, Prisma generate 7.10.0, API, web, and the Playwright project compiled with no errors.                                                                                                                                                        |
+| `npm run lint`                  | Exit 0. ESLint and Prettier reported no problems.                                                                                                                                                                                                            |
+| `npm test`                      | Exit 0 after the session-clock fix below. API: 8 files, 63 tests. Web: 9 files, 15 tests.                                                                                                                                                                    |
+| `npm run build`                 | Exit 0. Vite built 309 modules. `dist/index.html` 0.99 kB, CSS 23.92 kB, JS `index-7RhbRUFU.js` 552.40 kB (166.60 kB gzip). Vite warned that the JavaScript chunk exceeds 500 kB. The build embedded `http://127.0.0.1:4000` from the local web environment. |
+| `npm run db:seed`               | Exit 0. Prisma printed that the seed command was executed. It ran against the already populated database named in `apps/api/.env` (see failing checks). It does not prove a clean migrate-then-seed on empty PostgreSQL 16.                                  |
+| `npm run test:e2e`              | Exit 0 on the rerun after the visit-list fix. 12 passed in 39.2 seconds, one worker. Projects: phone 320×700, mobile 390×844, tablet 768×1024, desktop 1280×800.                                                                                             |
+
+`npx vitest run src/features/appointments/VisitsPage.test.tsx` in `apps/web` passed (1 file, 1 test) after the visit-list change.
+
+## Failing checks
+
+| Command             | Error                                                                                                                                                                                                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker --version`  | `CommandNotFoundException`. Docker is not installed on this machine. Compose was not started.                                                                                                                                                                         |
+| `npm run db:deploy` | Exit 1. Prisma P3005: "The database schema is not empty." Target: PostgreSQL database `postgres`, schema `public`, at `127.0.0.1:55444`. Prisma found 4 migrations. That socket is a leftover PGlite loaded outside Prisma's migration history. It was not baselined. |
+
+First `npm test` in this audit: API assistant integration, 8 failed and 55 passed (63). Web tests passed. Every assistant failure was `POST /api/auth/login` expected 200 and received 500. The body was `INTERNAL_ERROR` from `prisma.authSession.create`: PostgreSQL `23514`, new row for `auth_sessions` violates `auth_sessions_expiry_chk`. The assistant suite freezes the clock at `2026-10-14T12:00:00.000Z`, so `expires_at` was `2026-10-15T00:00:00.000Z`, while `created_at` defaulted to the database clock (about `2026-10-15T10:53Z`). `expires_at > created_at` failed. Auth tests use the real clock and passed.
+
+First `npm run test:e2e`: 11 passed, 1 failed. Phone project, "a patient can register, book, move, and cancel a visit", timed out at 90 seconds. The API logged `POST /api/appointments/:id/cancel` 409 `NOT_ELIGIBLE`. A diagnostic run with the eligibility path logged `appointment not eligible cancelled 2026-10-22T13:00:00.000Z 2026-10-15T11:05:01.716Z`. The cancel targeted the original Thursday 22 October 09:00 America/New_York visit after reschedule had already marked that row cancelled. The list showed the new visit, Thursday 29 October 09:00, still Confirmed. The cancel dialog stayed open and intercepted the click on Past.
+
+## Fixes applied
+
+1. Session insert now writes `createdAt` from the same application clock as `expiresAt` (`apps/api/src/services/auth.service.ts`, `apps/api/src/repositories/auth.repository.ts`). A frozen test clock behind the database clock no longer violates `auth_sessions_expiry_chk`. Rerun: `npx vitest run tests/assistant.integration.test.ts tests/auth.integration.test.ts` passed (2 files, 17 tests), then full `npm test` passed.
+2. The visit list disables Reschedule and Cancel while a change is in flight, refreshes the appointment query before closing the reschedule form, and closes the cancel dialog if the cancel fails so a failed dialog cannot cover the page (`apps/web/src/features/appointments/VisitsPage.tsx`). The phone workflow waits until the moved date is visible before it cancels. The diagnostic `console.error` was removed from `requireEditableAccess`. Rerun: phone workflow passed, then full `npm run test:e2e` passed 12/12. The visits unit test passed.
+
+## Workflows
+
+| Workflow                                          | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Register, log in, refresh, log out                | Playwright workflow at all four viewports. Unauthenticated `GET /api/auth/me` returns 401 `UNAUTHENTICATED` before login.                                                                                                                                                                                                                                                                                                                                                   |
+| Real services and slots                           | Booking uses catalog services and slots returned by the API. The phone and desktop flows book Follow-up visit (20 min) on a real open slot.                                                                                                                                                                                                                                                                                                                                 |
+| Manual booking                                    | Same Playwright flow. The booked state is set only after `createAppointment` returns.                                                                                                                                                                                                                                                                                                                                                                                       |
+| Chat booking with explicit confirmation           | API assistant integration tests, with a scripted model, passed after the session fix. They cover confirmation before a row is inserted. This machine has no `MISTRAL_API_KEY`. The e2e harness deletes that variable. The chat UI shows that the assistant is not configured, and the manual form still books. A live Mistral booking was not executed.                                                                                                                     |
+| Concurrent booking of the same staff slot         | Booking integration tests and the GiST exclusion `appointments_no_active_staff_overlap` in `apps/api/prisma/migrations/20261014210000_domain_model/migration.sql` and `database/schema.sql`. The exclusion is `staff_user_id WITH =` and `tstzrange(starts_at, ends_at, '[)') WITH &&` where status is `requested` or `confirmed` and `staff_user_id` is not null. This was exercised on PGlite, which provides `btree_gist`. It was not exercised on Docker PostgreSQL 16. |
+| Retrieve, cancel, reschedule                      | Playwright workflow after the visit-list fix, all four viewports. A failed reschedule path is covered by API tests: the original row stays when the new insert is rejected.                                                                                                                                                                                                                                                                                                 |
+| Patient cannot read another patient's records     | API authorization tests. A non-member clinic id returns 403.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Staff cannot read another clinic's protected data | API membership checks. Unknown clinic id for a non-member is 403.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| AI failure leaves manual booking usable           | E2e logs `assistant provider error` `MISSING_API_KEY` and the same test then books from the form.                                                                                                                                                                                                                                                                                                                                                                           |
+| Success only after the transaction commits        | The book page sets the success state from the API response. The assistant shows "Your visit is booked" from a persisted appointment. Model text is not a confirmation.                                                                                                                                                                                                                                                                                                      |
+
+## Security and data integrity
+
+Present in code and covered by the passing API tests: Argon2id password hashes; session tokens stored as hashes; 12-hour expiry; revocation; `auth_sessions_expiry_chk` (`expires_at > created_at`) and `auth_sessions_revoked_chk`; HTTP-only `careflow_session` cookie, `SameSite=Lax`, host-only, `Secure` only when `NODE_ENV` is `production`; CSRF requires `X-CareFlow-Request: 1` on non-safe `/api` methods and `X-CSRF-Token` (HMAC-SHA256 of the raw session token with `CSRF_SECRET`) on authenticated mutations; CORS allows `http://127.0.0.1:5173` and `http://localhost:5173` (the e2e origin is set to `http://127.0.0.1:5174`); Zod request validation; server-side membership checks; Helmet; log scrubbing of Postgres URLs. Logger paths used by the assistant do not record the message body, prompt, cookie, or key.
+
+Rate limiting covers login and signup only: 10 attempts per 15 minutes per socket address, in memory, with trust proxy off. Booking and chat are not rate-limited. The limiter resets when the process restarts.
+
+Idempotency applies when the client sends `Idempotency-Key` matching `^[A-Za-z0-9_-]{8,80}$`. A retry without that header can create a second visit when the times do not overlap.
+
+Overlapping active appointments for the same staff member are rejected by the PostgreSQL exclusion constraint above, and the booking transaction also locks the staff row. That constraint was verified through PGlite schema and booking tests. `npm run db:deploy` did not apply it to a clean PostgreSQL 16.
+
+These tests are not a penetration test. Security is not guaranteed by the suite.
+
+## AI workflow
+
+The intent schema is strict Zod in `packages/shared`. `parseModelIntent` rejects `sql`, `query`, `command`, `tool`, `tools`, and `function_call`. A free-form reply is not treated as a booking. The backend writes the user-facing text from the catalog, real slots, and persisted appointments. The model's clarification question is not displayed. Workflow phase is stored on `chat_sessions.workflow_state`. An emergency phrase list short-circuits before the model; it is not clinical triage. A missing key throws `MISSING_API_KEY` without a network call. Timeout is `TIMEOUT`. Other provider failures are `UNAVAILABLE`. Those messages do not include the prompt or the user's text. The API starts without a key. Model output cannot insert or confirm an appointment by itself; confirmation goes through the booking service.
+
+## Mobile
+
+Playwright passed at 320, 390, 768, and 1280 after the visit-list fix. The phone failure was a real interaction bug: confirming a new time changed the button label to "Saving…" immediately, the test continued, and Cancel still pointed at the pre-reschedule visit. The failed dialog then covered Past. Disabling those buttons while a save is in progress, and closing the dialog when cancel fails, is the product fix. No separate horizontal-overflow failure remained in the foundation or clinic-desk specs at those widths.
+
+## Incomplete
+
+- Notifications are not implemented.
+- There is no HTTP action to mark a visit completed or as a no-show. Those statuses exist on the enum.
+- Live Mistral booking, cancellation, and rescheduling were not run. The scripted-model integration tests were.
+- A clean migrate from an empty PostgreSQL 16, then seed, was not run.
+
+## Smallest remaining change
+
+Point `DATABASE_URL` at an empty PostgreSQL 16, install Docker or an equivalent server, and run `npm run db:deploy` then `npm run db:seed`. Do not baseline the leftover PGlite on port 55444 unless that database is intentionally kept. Do not apply a Prisma diff that drops the composite tenant foreign keys.
+
+## Highest-priority remaining blocker
+
+`npm run db:deploy` cannot be reproduced here. Docker is absent, and the configured database is a non-empty PGlite at `127.0.0.1:55444` with no Prisma migration history (P3005). Until that command succeeds on an empty PostgreSQL 16, the committed exclusion constraint has been proven on PGlite only.

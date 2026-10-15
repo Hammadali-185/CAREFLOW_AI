@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+apps/api/src/generated
+playwright-report
+test-results
+blob-report
+package-lock.json
+.env.example
+**/.env.example
+**/.gitkeep

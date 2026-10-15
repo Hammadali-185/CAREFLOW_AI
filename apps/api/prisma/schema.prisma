@@ -1,0 +1,309 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Applied migration marker. Domain tables live alongside this row.
+model SchemaMeta {
+  id        Int      @id
+  version   String
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(6)
+
+  @@map("schema_meta")
+}
+
+/// Role of a user inside one clinic. A person can hold different roles at different clinics.
+enum MembershipRole {
+  owner
+  staff
+  patient
+
+  @@map("membership_role")
+}
+
+/// Lifecycle of an appointment. Only requested and confirmed block a staff member's time.
+enum AppointmentStatus {
+  requested
+  confirmed
+  cancelled
+  completed
+  no_show
+
+  @@map("appointment_status")
+}
+
+enum ChatSenderKind {
+  user
+  assistant
+  system
+
+  @@map("chat_sender_kind")
+}
+
+enum AuditAction {
+  appointment_created
+  appointment_confirmed
+  appointment_cancelled
+  appointment_rescheduled
+  appointment_completed
+  appointment_no_show
+  staff_availability_changed
+  membership_changed
+
+  @@map("audit_action")
+}
+
+enum AiInteractionStatus {
+  succeeded
+  failed
+  refused
+
+  @@map("ai_interaction_status")
+}
+
+/// A clinic. timezone is an IANA name such as America/New_York, checked by trigger.
+model Business {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  timezone  String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  memberships    BusinessMembership[]
+  services       Service[]
+  appointments   Appointment[]
+  availability   StaffAvailability[]
+  timeOff        StaffTimeOff[]
+  chatSessions   ChatSession[]
+  auditEvents    AuditEvent[]
+  aiInteractions AiInteraction[]
+
+  @@map("businesses")
+}
+
+/// Login account. Email is globally unique and stored lowercase. Only password_hash is kept.
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  memberships          BusinessMembership[]
+  patientAppointments  Appointment[]        @relation("AppointmentPatient")
+  staffAppointments    Appointment[]        @relation("AppointmentStaff")
+  availability         StaffAvailability[]  @relation("AvailabilityStaff")
+  timeOff              StaffTimeOff[]       @relation("TimeOffStaff")
+  chatSessions         ChatSession[]        @relation("ChatParticipant")
+  sentMessages         ChatMessage[]        @relation("ChatMessageSender")
+  authSessions         AuthSession[]
+  auditEvents          AuditEvent[]
+  aiInteractions       AiInteraction[]
+
+  @@map("users")
+}
+
+/// Assigns a user to a clinic with one role. Composite unique key is the target for role-pinned foreign keys.
+model BusinessMembership {
+  businessId String         @map("business_id") @db.Uuid
+  userId     String         @map("user_id") @db.Uuid
+  role       MembershipRole
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([businessId, userId])
+  @@unique([businessId, userId, role], map: "business_memberships_business_user_role_key")
+  @@index([userId], map: "business_memberships_user_id_idx")
+  @@map("business_memberships")
+}
+
+model Service {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId      String   @map("business_id") @db.Uuid
+  name            String
+  durationMinutes Int      @map("duration_minutes")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  appointments Appointment[]
+
+  @@unique([businessId, id], map: "services_business_id_id_key")
+  @@unique([businessId, name], map: "services_business_id_name_key")
+  @@map("services")
+}
+
+/// Weekly bookable window in the clinic's local civil time. weekday is ISO: Monday = 1, Sunday = 7.
+model StaffAvailability {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String         @map("business_id") @db.Uuid
+  staffUserId  String         @map("staff_user_id") @db.Uuid
+  staffRole    MembershipRole @map("staff_role")
+  weekday      Int
+  startsMinute Int            @map("starts_minute")
+  endsMinute   Int            @map("ends_minute")
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  staff    User     @relation("AvailabilityStaff", fields: [staffUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([businessId, staffUserId, weekday], map: "staff_availability_lookup_idx")
+  @@map("staff_availability")
+}
+
+model StaffTimeOff {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId  String         @map("business_id") @db.Uuid
+  staffUserId String         @map("staff_user_id") @db.Uuid
+  staffRole   MembershipRole @map("staff_role")
+  startsAt    DateTime       @map("starts_at") @db.Timestamptz(6)
+  endsAt      DateTime       @map("ends_at") @db.Timestamptz(6)
+  reason      String?
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  staff    User     @relation("TimeOffStaff", fields: [staffUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([staffUserId, startsAt], map: "staff_time_off_staff_idx")
+  @@map("staff_time_off")
+}
+
+/// One booking. Active rows for the same staff member cannot overlap. See the exclusion constraint in the migration.
+model Appointment {
+  id                           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId                   String            @map("business_id") @db.Uuid
+  patientUserId                String            @map("patient_user_id") @db.Uuid
+  patientRole                  MembershipRole    @default(patient) @map("patient_role")
+  staffUserId                  String?           @map("staff_user_id") @db.Uuid
+  staffRole                    MembershipRole?   @map("staff_role")
+  serviceId                    String            @map("service_id") @db.Uuid
+  status                       AppointmentStatus
+  startsAt                     DateTime          @map("starts_at") @db.Timestamptz(6)
+  endsAt                       DateTime          @map("ends_at") @db.Timestamptz(6)
+  cancelledAt                  DateTime?         @map("cancelled_at") @db.Timestamptz(6)
+  rescheduledFromAppointmentId String?           @map("rescheduled_from_appointment_id") @db.Uuid
+  idempotencyKey               String?           @map("idempotency_key")
+  createdAt                    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                    DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  business         Business      @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  patient          User          @relation("AppointmentPatient", fields: [patientUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  staff            User?         @relation("AppointmentStaff", fields: [staffUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  service          Service       @relation(fields: [serviceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  rescheduledFrom  Appointment?  @relation("AppointmentReschedule", fields: [rescheduledFromAppointmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  rescheduledTo    Appointment[] @relation("AppointmentReschedule")
+  chatSessions     ChatSession[]
+
+  @@unique([businessId, id], map: "appointments_business_id_id_key")
+  @@index([patientUserId, startsAt(sort: Desc)], map: "appointments_patient_history_idx")
+  @@index([staffUserId, startsAt], map: "appointments_staff_schedule_idx")
+  @@index([businessId, startsAt], map: "appointments_clinic_calendar_idx")
+  @@unique([patientUserId, idempotencyKey], map: "appointments_patient_idempotency_key")
+  @@map("appointments")
+}
+
+model ChatSession {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId        String    @map("business_id") @db.Uuid
+  participantUserId String    @map("participant_user_id") @db.Uuid
+  appointmentId     String?   @map("appointment_id") @db.Uuid
+  openedAt          DateTime  @default(now()) @map("opened_at") @db.Timestamptz(6)
+  closedAt          DateTime? @map("closed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// Scheduling phase and extracted preferences. Not a transcript or a booking.
+  workflowState     Json      @default(dbgenerated("'{}'::jsonb")) @map("workflow_state") @db.JsonB
+
+  business       Business        @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  participant    User            @relation("ChatParticipant", fields: [participantUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  appointment    Appointment?    @relation(fields: [appointmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  messages       ChatMessage[]
+  aiInteractions AiInteraction[]
+
+  @@unique([businessId, id], map: "chat_sessions_business_id_id_key")
+  @@index([businessId, openedAt(sort: Desc)], map: "chat_sessions_clinic_recent_idx")
+  @@index([participantUserId, openedAt(sort: Desc)], map: "chat_sessions_participant_idx")
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId   String         @map("business_id") @db.Uuid
+  sessionId    String         @map("session_id") @db.Uuid
+  senderKind   ChatSenderKind @map("sender_kind")
+  senderUserId String?        @map("sender_user_id") @db.Uuid
+  body         String
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sender  User?       @relation("ChatMessageSender", fields: [senderUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([sessionId, createdAt], map: "chat_messages_session_chronology_idx")
+  @@map("chat_messages")
+}
+
+/// Server-side session. token_hash is a digest of the cookie value. The raw token is never stored.
+model AuthSession {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId], map: "auth_sessions_user_id_idx")
+  @@map("auth_sessions")
+}
+
+/// Operational audit row. metadata must not carry passwords, tokens, or message bodies.
+model AuditEvent {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId  String      @map("business_id") @db.Uuid
+  actorUserId String?     @map("actor_user_id") @db.Uuid
+  action      AuditAction
+  entityType  String      @map("entity_type")
+  entityId    String      @map("entity_id") @db.Uuid
+  metadata    Json        @default("{}") @map("metadata") @db.JsonB
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  actor    User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([businessId, entityType, entityId, createdAt], map: "audit_events_entity_idx")
+  @@map("audit_events")
+}
+
+/// Model call metadata only. Prompt and completion text stay in the chat transcript, not here.
+model AiInteraction {
+  id               String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  businessId       String              @map("business_id") @db.Uuid
+  actorUserId      String?             @map("actor_user_id") @db.Uuid
+  chatSessionId    String?             @map("chat_session_id") @db.Uuid
+  purpose          String
+  model            String
+  promptTokens     Int                 @map("prompt_tokens")
+  completionTokens Int                 @map("completion_tokens")
+  latencyMs        Int                 @map("latency_ms")
+  status           AiInteractionStatus
+  errorCode        String?             @map("error_code")
+  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business    Business     @relation(fields: [businessId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  actor       User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  chatSession ChatSession? @relation(fields: [chatSessionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([businessId, createdAt], map: "ai_interactions_business_idx")
+  @@index([chatSessionId, createdAt], map: "ai_interactions_session_idx")
+  @@map("ai_interactions")
+}

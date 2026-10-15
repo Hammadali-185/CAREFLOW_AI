@@ -1,0 +1,46 @@
+{
+  "name": "careflow-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CareFlow AI monorepo: appointment booking and clinic management foundation.",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "tests/e2e"
+  ],
+  "scripts": {
+    "dev": "npm run build -w @careflow/shared && concurrently -n api,web -c blue,green \"npm run dev -w @careflow/api\" \"npm run dev -w @careflow/web\"",
+    "dev:web": "npm run dev -w @careflow/web",
+    "dev:api": "npm run build -w @careflow/shared && npm run dev -w @careflow/api",
+    "build": "npm run build -w @careflow/shared && npm run build -w @careflow/api && npm run build -w @careflow/web",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:e2e": "npm run test:e2e -w @careflow/e2e",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "db:generate": "npm run db:generate -w @careflow/api",
+    "db:migrate": "npm run db:migrate -w @careflow/api",
+    "db:deploy": "npm run db:deploy -w @careflow/api",
+    "db:seed": "npm run db:seed -w @careflow/api",
+    "db:studio": "npm run db:studio -w @careflow/api",
+    "postinstall": "npm run build -w @careflow/shared && npm run db:generate -w @careflow/api"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.6",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
+  }
+}
