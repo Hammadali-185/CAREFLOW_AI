@@ -28,7 +28,7 @@ The form and the assistant render "Your visit is booked" from the appointment re
 
 ## Sessions are opaque cookies
 
-The database stores a SHA-256 digest. The cookie is HTTP-only, `SameSite=Lax`, and host-only. `Secure` is set when `NODE_ENV` is `production`. CSRF uses a custom header on every state change and an HMAC token on authenticated mutations. Login and signup are rate-limited in process memory. Other routes are not.
+The database stores a SHA-256 digest. The cookie is HTTP-only and host-only. Local development uses `SameSite=Lax`. Production uses `SameSite=None`, `Partitioned`, and `Secure` so a browser keeps the session when the site and API are different `onrender.com` hosts. CSRF uses a custom header on every state change and an HMAC token on authenticated mutations. Login and signup are rate-limited in process memory. Other routes are not.
 
 ## The model cannot write to the database
 

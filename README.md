@@ -151,7 +151,7 @@ The full record is [docs/decisions.md](docs/decisions.md). The choices that affe
 - **The database rejects overlapping active visits.** An exclusion constraint blocks two `requested` or `confirmed` visits for the same staff member. The booking transaction also locks the staff row. Reschedule cancels the old row and inserts the new one in that transaction. Back-to-back visits are allowed because ranges are half-open.
 - **Hand-written SQL sits beside Prisma.** Composite tenant foreign keys, checks, triggers, and the exclusion constraint are in the migrations. `prisma migrate diff` wants to drop those foreign keys. That diff is not applied.
 - **The model cannot write appointments.** Mistral returns an intent. The API writes the patient-facing sentence from clinic data and calls the booking service only after the patient confirms a real slot.
-- **Sessions are HTTP-only cookies.** The database stores a SHA-256 digest. The cookie is host-only and `SameSite=Lax`. `Secure` is added when `NODE_ENV` is `production`. State-changing `/api` requests need `X-CareFlow-Request: 1`. Authenticated mutations also need `X-CSRF-Token`.
+- **Sessions are HTTP-only cookies.** The database stores a SHA-256 digest. The cookie is host-only. Local development uses `SameSite=Lax`. Production uses `SameSite=None`, `Partitioned`, and `Secure` so the session survives when the site and API are different hosts. State-changing `/api` requests need `X-CareFlow-Request: 1`. Authenticated mutations also need `X-CSRF-Token`.
 - **Idempotency is optional.** A valid `Idempotency-Key` replays the same booking. A request without that header can create another visit when the times do not overlap.
 
 ## Assumptions and known limitations

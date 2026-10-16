@@ -15,12 +15,12 @@ Passwords are hashed with Argon2id (`memoryCost` 19456 KiB, `timeCost` 2, `paral
 A session is 32 random bytes, encoded as base64url. PostgreSQL stores the SHA-256 hex digest in `auth_sessions.token_hash`. The browser receives the raw token in the `careflow_session` cookie:
 
 - `HttpOnly`
-- `SameSite=Lax`
+- `SameSite=Lax` in local development, `SameSite=None` and `Partitioned` in production
 - `Path=/`
 - `Max-Age` of 12 hours
 - `Secure` when `NODE_ENV` is `production`
 
-There is no `Domain` attribute, so the cookie is host-only. `127.0.0.1` and `localhost` do not share it. Open the web app and the API on the same host.
+There is no `Domain` attribute, so the cookie is host-only. `127.0.0.1` and `localhost` do not share it. Open the web app and the API on the same host during local development. Production uses `SameSite=None` because `onrender.com` is a public suffix and the site and API are cross-site.
 
 `GET /api/auth/me` accepts a session only when `revoked_at` is null and `expires_at` is still in the future. Logout sets `revoked_at`. An expired, revoked, or unknown cookie is cleared and answered with `401`. Login and signup revoke a presented session and issue a new token, so a session id from before authentication cannot be kept.
 

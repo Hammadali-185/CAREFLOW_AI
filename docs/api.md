@@ -50,7 +50,7 @@ Same readiness check and response as `GET /api/health/ready`. Both paths stay av
 
 ## Authentication
 
-Sessions are opaque tokens stored as SHA-256 digests in `auth_sessions`. The browser receives the raw token only in the `careflow_session` cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, and a 12-hour `Max-Age`. `Secure` is set when `NODE_ENV` is `production`. The cookie is host-only. Use one host, such as `127.0.0.1`, for both the web app and the API so the cookie is sent.
+Sessions are opaque tokens stored as SHA-256 digests in `auth_sessions`. The browser receives the raw token only in the `careflow_session` cookie: `HttpOnly`, `Path=/`, and a 12-hour `Max-Age`. Local development uses `SameSite=Lax`. Production uses `SameSite=None`, `Partitioned`, and `Secure`, because a split site and API on `onrender.com` are cross-site. The cookie is host-only. Use one host, such as `127.0.0.1`, for both the web app and the API in local development.
 
 Responses never include `passwordHash`, `tokenHash`, or the raw session token. Login, signup, and `GET /api/auth/me` return:
 

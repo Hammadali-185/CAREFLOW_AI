@@ -30,10 +30,14 @@ export function readCookie(header: string | undefined, name: string): string | u
 }
 
 export function sessionCookieOptions(nodeEnv: NodeEnv) {
+  // onrender.com is a public suffix, so the static site and the API are cross-site.
+  // A Lax cookie set by the API is dropped. Production uses a partitioned None cookie.
+  const crossSite = nodeEnv === 'production';
   return {
     httpOnly: true,
-    secure: nodeEnv === 'production',
-    sameSite: 'lax' as const,
+    secure: crossSite,
+    sameSite: crossSite ? ('none' as const) : ('lax' as const),
+    partitioned: crossSite,
     path: '/',
     maxAge: SESSION_TTL_MS,
   };
