@@ -2,7 +2,7 @@ import { createContext, useContext } from 'react';
 import type { AlertTone } from './Alert';
 
 export type ToastApi = {
-  show: (message: string, tone?: AlertTone) => void;
+  show: (message: string, tone?: AlertTone, title?: string) => void;
 };
 
 export const ToastContext = createContext<ToastApi | null>(null);

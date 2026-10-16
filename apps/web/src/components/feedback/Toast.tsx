@@ -5,6 +5,7 @@ import { ToastContext } from './toast-context';
 type ToastItem = {
   id: string;
   tone: AlertTone;
+  title: string;
   message: string;
 };
 
@@ -16,9 +17,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const show = useCallback(
-    (message: string, tone: AlertTone = 'info') => {
+    (message: string, tone: AlertTone = 'info', title?: string) => {
       const id = crypto.randomUUID();
-      setToasts((current) => [...current, { id, tone, message }]);
+      const resolvedTitle = title ?? (tone === 'danger' ? 'Something went wrong' : 'Notice');
+      setToasts((current) => [...current, { id, tone, title: resolvedTitle, message }]);
       window.setTimeout(() => dismiss(id), 5000);
     },
     [dismiss],
@@ -35,10 +37,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       >
         {toasts.map((toast) => (
           <div key={toast.id} className="pointer-events-auto">
-            <Alert
-              tone={toast.tone}
-              title={toast.tone === 'danger' ? 'Something went wrong' : 'Notice'}
-            >
+            <Alert tone={toast.tone} title={toast.title}>
               {toast.message}
             </Alert>
           </div>

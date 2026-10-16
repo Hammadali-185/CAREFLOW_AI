@@ -22,7 +22,6 @@ The web app owns screens, forms, and server-state. The API owns configuration, H
 | Directory                        | Responsibility                                     |
 | -------------------------------- | -------------------------------------------------- |
 | `src/app`                        | Router, providers, and the root layout             |
-| `src/assets`                     | Static files imported by the app                   |
 | `src/components/ui`              | Buttons, inputs, labels, cards, badges             |
 | `src/components/layout`          | Sidebar, header, footer, and mobile navigation     |
 | `src/components/feedback`        | Loading, errors, and empty states                  |
@@ -41,7 +40,7 @@ The web app owns screens, forms, and server-state. The API owns configuration, H
 
 React Router renders the screen tree. TanStack Query loads health and the current session. React Hook Form and Zod validate sign-in and registration, then the API client sends those requests with credentials. The session cookie is HTTP-only. Authorization is enforced on the API.
 
-The browser reads `VITE_API_BASE_URL` at startup and refuses to render the app when it is missing or not an absolute URL. Vite aliases `@careflow/shared` to the shared TypeScript source during development.
+The browser reads `VITE_API_BASE_URL` at startup and refuses to render the app when it is missing or not an absolute URL. The icon is `public/favicon.svg`. Vite and the web TypeScript config both alias `@careflow/shared` to the shared TypeScript source, in development and in the production web build.
 
 Signed-in routes use `DashboardFrame`: a sidebar from the `lg` breakpoint up, a menu drawer below it, and a bottom shortcut bar. Public pages keep the site header and footer. Navigation items live in `src/app/navigation.ts`. Patients land on `/dashboard`. Staff and clinic administrators land on `/clinic`.
 

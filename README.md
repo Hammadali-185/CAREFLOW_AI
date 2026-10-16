@@ -2,6 +2,11 @@
 
 CareFlow AI is a mobile-friendly clinic app for appointment booking. Sign-in creates a session. Patients book from a form or ask the scheduling assistant. A visit is saved only after they confirm a real open time.
 
+- [Run it locally](#install)
+- [High-level architecture](#high-level-architecture)
+- [Key design decisions and tradeoffs](#key-design-decisions-and-tradeoffs)
+- [Assumptions and known limitations](#assumptions-and-known-limitations)
+
 ## Prerequisites
 
 - Node.js 22.12 or newer
@@ -109,6 +114,67 @@ Web (`apps/web/.env`):
 
 The web app stops on a configuration screen when that URL is missing. The API exits before listening when required variables are missing or invalid.
 
+Optional assistant settings in `apps/api/.env`:
+
+| Variable             | Role                                                                                          |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `MISTRAL_API_KEY`    | Provider key. Leave it unset to run the API without the model. The browser never receives it. |
+| `MISTRAL_MODEL`      | Model name. The example default is `mistral-small-latest`.                                    |
+| `MISTRAL_TIMEOUT_MS` | Request timeout in milliseconds. The example default is `20000`. Maximum accepted is `60000`. |
+
+## High-level architecture
+
+CareFlow AI is one npm workspace with three parts:
+
+```text
+apps/web            React screens, forms, and server state
+apps/api            Express HTTP API, validation, sessions, and PostgreSQL
+packages/shared     Zod contracts both sides parse
+database            Review copy of the schema, plus the demo seed
+```
+
+A browser action calls `apps/web/src/lib/api-client.ts`. The API mounts health, auth, clinic, scheduling, and assistant routes under `/api`. Controllers call services. Services call repositories. Only `apps/api/src/server.ts` opens a port and constructs the Prisma client. Tests import `apps/api/src/app.ts` and do not listen.
+
+Signed-in routes are `/dashboard`, `/account`, `/assistant`, `/book`, `/visits`, and `/clinic`. Public signup creates a patient membership. Staff and the clinic administrator (`owner`) use the clinic desk. Patients use the dashboard, the booking form, and the assistant.
+
+The assistant calls Mistral from the API. Greetings and emergency phrases are handled before the model. Any other reply must match the shared intent schema. Searching slots and saving a visit go through the same scheduling service as the form. The screen says a visit is booked only after that service returns the saved row.
+
+PostgreSQL is the system of record. Prisma Migrate applies `apps/api/prisma/migrations`. `database/schema.sql` is the same end state for review and for the catalog test. `npm run db:seed` runs `database/seed.sql`.
+
+Directory detail is in [docs/architecture.md](docs/architecture.md). HTTP routes are in [docs/api.md](docs/api.md). Tables and constraints are in [docs/database.md](docs/database.md).
+
+## Key design decisions and tradeoffs
+
+The full record is [docs/decisions.md](docs/decisions.md). The choices that affect how the app behaves:
+
+- **One API process and one web app.** Booking, accounts, and the assistant share one Express process. A slow model call holds that request until it finishes or times out. There is no worker or queue.
+- **The database rejects overlapping active visits.** An exclusion constraint blocks two `requested` or `confirmed` visits for the same staff member. The booking transaction also locks the staff row. Reschedule cancels the old row and inserts the new one in that transaction. Back-to-back visits are allowed because ranges are half-open.
+- **Hand-written SQL sits beside Prisma.** Composite tenant foreign keys, checks, triggers, and the exclusion constraint are in the migrations. `prisma migrate diff` wants to drop those foreign keys. That diff is not applied.
+- **The model cannot write appointments.** Mistral returns an intent. The API writes the patient-facing sentence from clinic data and calls the booking service only after the patient confirms a real slot.
+- **Sessions are HTTP-only cookies.** The database stores a SHA-256 digest. The cookie is host-only and `SameSite=Lax`. `Secure` is added when `NODE_ENV` is `production`. State-changing `/api` requests need `X-CareFlow-Request: 1`. Authenticated mutations also need `X-CSRF-Token`.
+- **Idempotency is optional.** A valid `Idempotency-Key` replays the same booking. A request without that header can create another visit when the times do not overlap.
+
+## Assumptions and known limitations
+
+Assumptions the local app and tests rely on:
+
+- Node.js 22.12 or newer and npm 11 or newer.
+- PostgreSQL accepts the connection string in `DATABASE_URL`. Docker Compose provides PostgreSQL 16. Automated tests use PGlite and do not start Docker.
+- Registration needs an existing clinic slug. The seeded slug is `harbor-light`.
+- The browser and the API are opened on the same host, such as `127.0.0.1`, so the host-only session cookie is sent.
+- `CSRF_SECRET` is at least 32 characters. The example file has a local placeholder. Replace it before any shared environment.
+- Demo accounts use the password `DemoCareflow!2026`. Ali Subhan is the clinic administrator, Hamza Qureshi is staff, and Fatima Noor is a patient.
+
+Known limitations:
+
+- Notifications are not implemented.
+- There is no HTTP action to mark a visit completed or as a no-show. Those statuses exist on the appointment enum and do not block staff time.
+- Login and signup are limited to 10 attempts per 15 minutes per socket address, in memory, in one process. A restart clears the counters. Booking and chat are not rate-limited.
+- The emergency check is a phrase list, not clinical triage.
+- A missing `MISTRAL_API_KEY`, a timeout, a rate limit, or an intent that fails the schema leaves appointments unchanged and points the patient to the booking form.
+- Passing the tests in this repository is not a penetration test. Controls and remaining gaps are in [docs/security.md](docs/security.md).
+- The dated verification notes in [docs/assessment.md](docs/assessment.md) and [docs/implementation-audit.md](docs/implementation-audit.md) describe one machine on 15 October 2026. They are not the current deploy procedure.
+
 ## Project map
 
 ```text
@@ -116,14 +182,6 @@ apps/web            React, Vite, Tailwind, React Router
 apps/api            Express, Zod, Prisma
 packages/shared     Shared response schemas
 database            SQL schema and seed for review
-tests               Playwright, fixtures, and notes
+tests               Playwright, a public id list, and notes
 docs                Architecture, database, API, security, decisions
 ```
-
-Further detail is in [docs/architecture.md](docs/architecture.md), [docs/database.md](docs/database.md), [docs/api.md](docs/api.md), [docs/security.md](docs/security.md), and [docs/decisions.md](docs/decisions.md). The assessment record is [docs/assessment.md](docs/assessment.md).
-
-## Current limits
-
-Included now: registration, login, logout, server-side sessions, role checks for patient, staff, and clinic administrator (`owner`), appointment booking, the clinic desk, and a scheduling assistant that calls Mistral from the API.
-
-Not included: notifications. The assistant starts without `MISTRAL_API_KEY` and points patients to the booking form. The browser never receives the provider key.

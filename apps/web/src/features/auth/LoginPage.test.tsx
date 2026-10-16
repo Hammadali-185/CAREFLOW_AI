@@ -58,6 +58,42 @@ describe('sign in and registration', () => {
     expect(screen.getByText(/harbor-light/i)).toBeVisible();
   });
 
+  it('shows a notice when the email is already registered', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/auth/me')) {
+          return json({ error: { code: 'UNAUTHENTICATED', message: 'Sign in to continue.' } }, 401);
+        }
+        if (url.endsWith('/api/auth/signup')) {
+          return json(
+            {
+              error: {
+                code: 'ACCOUNT_EXISTS',
+                message: 'An account with that email already exists.',
+              },
+            },
+            409,
+          );
+        }
+        return json({ error: { code: 'NOT_FOUND', message: 'Missing.' } }, 404);
+      }),
+    );
+    renderRoute('/register');
+
+    await user.type(await screen.findByLabelText('Full name'), 'Ada Patient');
+    await user.type(screen.getByLabelText('Email'), 'ada@clinic.test');
+    await user.type(screen.getByLabelText('Clinic slug'), 'harbor-light');
+    await user.type(screen.getByLabelText('Password'), 'DemoCareflow!2026');
+    await user.type(screen.getByLabelText('Confirm password'), 'DemoCareflow!2026');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(await screen.findAllByText('You already have an account')).toHaveLength(2);
+    expect(screen.queryByText('Registration failed')).not.toBeInTheDocument();
+  });
+
   it('sends visitors without a session from the account page to sign in', async () => {
     renderRoute('/account');
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeVisible();

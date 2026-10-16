@@ -12,12 +12,15 @@ import { Select } from '../../components/ui/Select';
 import { ApiError } from '../../lib/api-client';
 import { homePath } from '../../app/navigation';
 import { AuthShell } from './AuthShell';
+import { useToast } from '../../components/feedback/toast-context';
 import { useAuth } from './auth-session';
 import { registerSchema, type RegisterValues } from './schemas';
 
 export function RegisterPage() {
   const auth = useAuth();
+  const toast = useToast();
   const [formError, setFormError] = useState<string | null>(null);
+  const [accountExists, setAccountExists] = useState(false);
   const form = useForm<RegisterValues>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
@@ -57,6 +60,7 @@ export function RegisterPage() {
         noValidate
         onSubmit={form.handleSubmit(async (values) => {
           setFormError(null);
+          setAccountExists(false);
           try {
             await auth.signup({
               displayName: values.displayName,
@@ -65,12 +69,29 @@ export function RegisterPage() {
               businessSlug: values.businessSlug,
             });
           } catch (error) {
+            if (error instanceof ApiError && error.code === 'ACCOUNT_EXISTS') {
+              setAccountExists(true);
+              toast.show(
+                'Sign in with this email instead of creating a new account.',
+                'info',
+                'You already have an account',
+              );
+              return;
+            }
             setFormError(
               error instanceof ApiError ? error.message : 'Registration failed. Try again.',
             );
           }
         })}
       >
+        {accountExists ? (
+          <Alert tone="info" title="You already have an account">
+            Sign in with this email.{' '}
+            <Link to="/login" className="focus-ring rounded-sm font-semibold text-teal-deep">
+              Sign in
+            </Link>
+          </Alert>
+        ) : null}
         {formError ? (
           <Alert tone="danger" title="Registration failed">
             {formError}
