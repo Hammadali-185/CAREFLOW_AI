@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { looksLikeEmergency } from '../src/modules/assistant/emergency.js';
 import { looksLikeGreeting } from '../src/modules/assistant/greeting.js';
+import { screenedIntent } from '../src/modules/assistant/screen.js';
 import { createMistralClient } from '../src/modules/assistant/mistral.js';
 import { ModelRequestError } from '../src/modules/assistant/model.js';
 import { parseModelIntent } from '../src/modules/assistant/parse-intent.js';
@@ -93,6 +94,13 @@ describe('scheduling intent', () => {
     expect(looksLikeGreeting('hi')).toBe(true);
     expect(looksLikeGreeting('Hi, how are you?')).toBe(true);
     expect(looksLikeGreeting('I need a follow-up next Thursday')).toBe(false);
+    expect(screenedIntent('Follow-up visit', ['Follow-up visit', 'Annual physical'])).toMatchObject(
+      { intent: 'book', serviceQuery: 'Follow-up visit' },
+    );
+    expect(screenedIntent('Tomorrow', ['Follow-up visit'])).toMatchObject({
+      datePreference: 'tomorrow',
+    });
+    expect(screenedIntent('I need a follow-up next Thursday', ['Follow-up visit'])).toBeNull();
   });
 });
 

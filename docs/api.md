@@ -156,7 +156,7 @@ In production, unexpected errors return the message `Something went wrong.` The 
 | `LOG_LEVEL`          | no       | `debug`, `info`, `warn`, or `error`                                                                                 |
 | `PG_POOL_MAX`        | no       | Positive integer pool size. The local PGlite socket used for tests needs `1` because it serves one query at a time. |
 | `MISTRAL_API_KEY`    | no       | Mistral key for the scheduling assistant. The API starts without it.                                                |
-| `MISTRAL_MODEL`      | no       | Model name, default `mistral-small-latest`                                                                          |
+| `MISTRAL_MODEL`      | no       | Model name, default `ministral-3b-latest`                                                                           |
 | `MISTRAL_TIMEOUT_MS` | no       | Provider timeout, default `20000`                                                                                   |
 
 Missing or invalid required values stop the process before it listens. The validation error names the variable and does not print the database URL.

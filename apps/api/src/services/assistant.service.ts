@@ -6,10 +6,12 @@ import type {
 } from '@careflow/shared';
 import { EMERGENCY_REPLY, looksLikeEmergency } from '../modules/assistant/emergency.js';
 import { greetingReply, looksLikeGreeting } from '../modules/assistant/greeting.js';
+import { screenedIntent } from '../modules/assistant/screen.js';
 import {
   MODEL_HISTORY_LIMIT,
   ModelRequestError,
   type ModelClient,
+  type ModelCompletion,
 } from '../modules/assistant/model.js';
 import { parseModelIntent } from '../modules/assistant/parse-intent.js';
 import { buildSystemPrompt } from '../modules/assistant/prompt.js';
@@ -184,61 +186,80 @@ export function createAssistantService(deps: {
       }
 
       const catalog = await catalogFor(loaded.clinic);
-      let completion: Awaited<ReturnType<ModelClient['complete']>>;
-      try {
-        const history = await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT);
-        completion = await deps.model.complete({
-          system: buildSystemPrompt({
-            serviceNames: catalog.services.map((service) => service.name),
-            staffNames: catalog.staff.map((person) => person.displayName),
-            today: clinicDate(now(), loaded.clinic.timezone),
-            timeZone: loaded.clinic.timezone,
-            state: loaded.workflow,
-          }),
-          messages: history
-            .filter(
-              (message) => message.senderKind === 'user' || message.senderKind === 'assistant',
+      const screened =
+        loaded.workflow.phase === 'collecting' && loaded.workflow.selectedSlot === null
+          ? screenedIntent(
+              text,
+              catalog.services.map((service) => service.name),
             )
-            .slice(-MODEL_HISTORY_LIMIT)
-            .map((message) => ({
-              role: message.senderKind === 'user' ? ('user' as const) : ('assistant' as const),
-              content: message.body,
-            })),
-        });
-      } catch (error) {
-        const failure = error instanceof ModelRequestError ? error : unavailable();
-        deps.logger.warn('assistant provider error', {
-          purpose: 'extract_intent',
-          status: 'failed',
-          errorCode: failure.code,
+          : null;
+      let completion: ModelCompletion;
+      if (screened) {
+        completion = {
+          content: '',
+          model: 'careflow-screen',
+          promptTokens: 0,
+          completionTokens: 0,
           latencyMs: 0,
-        });
-        return finish(loaded, {
-          workflow: loaded.workflow,
-          reply: failure.message,
-          outcome: 'unavailable',
-          interaction: {
+        };
+      } else {
+        try {
+          const history = await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT);
+          completion = await deps.model.complete({
+            system: buildSystemPrompt({
+              serviceNames: catalog.services.map((service) => service.name),
+              staffNames: catalog.staff.map((person) => person.displayName),
+              today: clinicDate(now(), loaded.clinic.timezone),
+              timeZone: loaded.clinic.timezone,
+              state: loaded.workflow,
+            }),
+            messages: history
+              .filter(
+                (message) => message.senderKind === 'user' || message.senderKind === 'assistant',
+              )
+              .slice(-MODEL_HISTORY_LIMIT)
+              .map((message) => ({
+                role: message.senderKind === 'user' ? ('user' as const) : ('assistant' as const),
+                content: message.body,
+              })),
+          });
+        } catch (error) {
+          const failure = error instanceof ModelRequestError ? error : unavailable();
+          deps.logger.warn('assistant provider error', {
             purpose: 'extract_intent',
-            model: 'unavailable',
-            promptTokens: 0,
-            completionTokens: 0,
-            latencyMs: 0,
             status: 'failed',
             errorCode: failure.code,
-          },
+            latencyMs: 0,
+          });
+          return finish(loaded, {
+            workflow: loaded.workflow,
+            reply: failure.message,
+            outcome: 'unavailable',
+            interaction: {
+              purpose: 'extract_intent',
+              model: 'unavailable',
+              promptTokens: 0,
+              completionTokens: 0,
+              latencyMs: 0,
+              status: 'failed',
+              errorCode: failure.code,
+            },
+          });
+        }
+
+        deps.logger.info('assistant model', {
+          purpose: 'extract_intent',
+          model: completion.model,
+          latencyMs: completion.latencyMs,
+          promptTokens: completion.promptTokens,
+          completionTokens: completion.completionTokens,
+          status: 'succeeded',
         });
       }
 
-      deps.logger.info('assistant model', {
-        purpose: 'extract_intent',
-        model: completion.model,
-        latencyMs: completion.latencyMs,
-        promptTokens: completion.promptTokens,
-        completionTokens: completion.completionTokens,
-        status: 'succeeded',
-      });
-
-      const parsed = parseModelIntent(completion.content);
+      const parsed = screened
+        ? { ok: true as const, intent: screened }
+        : parseModelIntent(completion.content);
       if (!parsed.ok) {
         return finish(loaded, {
           workflow: loaded.workflow,
