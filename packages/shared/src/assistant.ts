@@ -16,6 +16,8 @@ export const assistantMissingFieldSchema = z.enum([
   'time',
   'staff',
   'appointment',
+  'name',
+  'phone',
 ]);
 
 export const assistantProposedActionSchema = z.enum([
@@ -38,6 +40,8 @@ export const modelIntentSchema = z
     datePreference: z.string().max(80).nullable(),
     timePreference: z.string().max(80).nullable(),
     staffQuery: z.string().max(120).nullable(),
+    contactName: z.string().max(120).nullable().default(null),
+    contactPhone: z.string().max(32).nullable().default(null),
     missingFields: z.array(assistantMissingFieldSchema).max(5),
     needsClarification: z.boolean(),
     clarificationQuestion: z.string().max(400).nullable(),
@@ -85,6 +89,8 @@ export const workflowStateSchema = z.object({
   appointmentId: z.uuid().nullable(),
   offeredSlots: z.array(slotSchema).max(16),
   selectedSlot: slotSchema.nullable(),
+  contactName: z.string().max(120).nullable().default(null),
+  contactPhone: z.string().max(32).nullable().default(null),
   missingFields: z.array(assistantMissingFieldSchema).max(5),
   confirmationState: assistantConfirmationStateSchema,
   turnKey: z

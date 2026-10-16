@@ -325,6 +325,8 @@ function intent(overrides: Partial<ModelIntent>): ModelIntent {
     datePreference: null,
     timePreference: null,
     staffQuery: null,
+    contactName: null,
+    contactPhone: null,
     missingFields: [],
     needsClarification: false,
     clarificationQuestion: null,

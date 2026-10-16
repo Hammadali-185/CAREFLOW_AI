@@ -48,6 +48,8 @@ describe('visit filters', () => {
                   startsAt: '2026-12-01T15:00:00.000Z',
                   endsAt: '2026-12-01T15:20:00.000Z',
                   cancelledAt: null,
+                  patientContactName: 'Fatima Noor',
+                  patientPhone: '555-010-2345',
                 },
               ],
             },

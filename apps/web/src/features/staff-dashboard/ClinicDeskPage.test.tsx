@@ -90,6 +90,8 @@ function visit(id: string, starts: Date) {
     startsAt: starts.toISOString(),
     endsAt: new Date(starts.getTime() + 20 * 60 * 1000).toISOString(),
     cancelledAt: null,
+    patientContactName: 'Fatima Noor',
+    patientPhone: '555-010-2345',
   };
 }
 

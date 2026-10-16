@@ -29,6 +29,17 @@ export function AppointmentCard({
           <p className="text-sm leading-6 text-ink-soft">
             {appointment.staffName} at {appointment.clinicName}
           </p>
+          {appointment.patientContactName || appointment.patientPhone ? (
+            <p className="mt-2 text-sm leading-6 text-ink">
+              {appointment.patientContactName ? (
+                <span>Patient: {appointment.patientContactName}</span>
+              ) : null}
+              {appointment.patientContactName && appointment.patientPhone ? (
+                <span className="text-ink-soft"> · </span>
+              ) : null}
+              {appointment.patientPhone ? <span>{appointment.patientPhone}</span> : null}
+            </p>
+          ) : null}
         </div>
         {actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}
       </div>

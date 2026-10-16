@@ -26,6 +26,10 @@ const workflowSql = readFileSync(
   resolve(repoRoot, 'apps/api/prisma/migrations/20261015010000_chat_workflow_state/migration.sql'),
   'utf8',
 );
+const contactSql = readFileSync(
+  resolve(repoRoot, 'apps/api/prisma/migrations/20261016190000_appointment_contact/migration.sql'),
+  'utf8',
+);
 const schemaSql = readFileSync(resolve(repoRoot, 'database/schema.sql'), 'utf8');
 const seedSql = readFileSync(resolve(repoRoot, 'database/seed.sql'), 'utf8');
 
@@ -79,6 +83,7 @@ async function applyMigrations(db: PGlite) {
   await db.exec(domainSql);
   await db.exec(bookingSql);
   await db.exec(workflowSql);
+  await db.exec(contactSql);
 }
 
 async function catalog(db: PGlite) {

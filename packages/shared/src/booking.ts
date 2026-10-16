@@ -49,6 +49,19 @@ export const slotSearchResponseSchema = z.object({
   slots: z.array(slotSchema),
 });
 
+export const patientContactNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'Enter the name for this visit.')
+  .max(120, 'Use at most 120 characters.');
+
+export const patientPhoneSchema = z
+  .string()
+  .trim()
+  .min(7, 'Enter a phone number we can reach.')
+  .max(32, 'Use at most 32 characters.')
+  .regex(/^[+]?[\d\s().-]{7,32}$/, 'Enter a phone number with digits.');
+
 export const appointmentSchema = z.object({
   id: z.uuid(),
   clinicId: z.uuid(),
@@ -62,6 +75,8 @@ export const appointmentSchema = z.object({
   startsAt: z.string(),
   endsAt: z.string(),
   cancelledAt: z.string().nullable(),
+  patientContactName: z.string().nullable(),
+  patientPhone: z.string().nullable(),
 });
 
 export const appointmentResponseSchema = z.object({
@@ -77,6 +92,8 @@ export const createAppointmentRequestSchema = z.object({
   serviceId: z.uuid('Choose a service.'),
   staffUserId: z.uuid('Choose a staff member.'),
   startsAt: z.string().min(1, 'Choose a time.'),
+  patientContactName: patientContactNameSchema,
+  patientPhone: patientPhoneSchema,
 });
 
 export const rescheduleAppointmentRequestSchema = z.object({

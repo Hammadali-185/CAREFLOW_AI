@@ -227,6 +227,8 @@ export function createSchedulingService(deps: {
           idempotencyKey: key,
           actorUserId: input.actorUserId,
           now: now(),
+          patientContactName: input.body.patientContactName,
+          patientPhone: input.body.patientPhone,
         });
         return { appointment: toPublic(booked), replayed: false };
       } catch (error) {
@@ -300,6 +302,8 @@ export function createSchedulingService(deps: {
           actorUserId,
           now: now(),
           excludeAppointmentId: current.id,
+          patientContactName: current.patientContactName,
+          patientPhone: current.patientPhone,
         });
         return toPublic(moved);
       } catch (error) {
@@ -408,6 +412,8 @@ function toPublic(row: StoredAppointment): AppointmentRecord {
     startsAt: row.startsAt,
     endsAt: row.endsAt,
     cancelledAt: row.cancelledAt,
+    patientContactName: row.patientContactName,
+    patientPhone: row.patientPhone,
   };
 }
 

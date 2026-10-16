@@ -59,6 +59,12 @@ beforeAll(async () => {
       'utf8',
     ),
   );
+  await database.exec(
+    readFileSync(
+      resolve(repoRoot, 'apps/api/prisma/migrations/20261016190000_appointment_contact/migration.sql'),
+      'utf8',
+    ),
+  );
   socket = new PGLiteSocketServer({ db: database, port: 55443, host: '127.0.0.1' });
   await socket.start();
   prisma = createPrismaClient(
@@ -376,7 +382,13 @@ function book(session: Session, slot: Slot, key?: string) {
     .set(CARE_FLOW_REQUEST_HEADER, '1')
     .set(CSRF_HEADER, session.csrf)
     .set('Cookie', session.cookie)
-    .send({ serviceId, staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    .send({
+      serviceId,
+      staffUserId: slot.staffUserId,
+      startsAt: slot.startsAt,
+      patientContactName: 'Fatima Noor',
+      patientPhone: '555-010-2345',
+    });
   return key ? call.set(IDEMPOTENCY_HEADER, key) : call;
 }
 

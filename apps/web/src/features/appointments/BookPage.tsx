@@ -7,6 +7,7 @@ import { ErrorState } from '../../components/feedback/ErrorState';
 import { LoadingSkeleton } from '../../components/feedback/LoadingSkeleton';
 import { PageContainer } from '../../components/layout/PageContainer';
 import { Button } from '../../components/ui/Button';
+import { FormField } from '../../components/ui/FormField';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Select } from '../../components/ui/Select';
 import { useAuth } from '../auth/auth-session';
@@ -32,6 +33,8 @@ export function BookPage() {
     staffUserId: '',
     slot: null,
   });
+  const [contactName, setContactName] = useState(auth.user?.displayName ?? '');
+  const [contactPhone, setContactPhone] = useState('');
   const [reviewing, setReviewing] = useState(false);
   const [booked, setBooked] = useState<AppointmentRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +86,13 @@ export function BookPage() {
     try {
       const result = await api.createAppointment(
         clinicId,
-        { serviceId: draft.serviceId, staffUserId: slot.staffUserId, startsAt: slot.startsAt },
+        {
+          serviceId: draft.serviceId,
+          staffUserId: slot.staffUserId,
+          startsAt: slot.startsAt,
+          patientContactName: contactName.trim(),
+          patientPhone: contactPhone.trim(),
+        },
         auth.csrfToken,
         idempotency.current.key,
       );
@@ -190,6 +199,29 @@ export function BookPage() {
               <p className="text-sm text-ink-soft">
                 {formatVisitTime(draft.slot.startsAt, timeZone)}
               </p>
+              <div className="mt-4 grid gap-3">
+                <FormField id="booking-contact-name" label="Name on this visit">
+                  <input
+                    id="booking-contact-name"
+                    className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-base text-ink"
+                    value={contactName}
+                    onChange={(event) => setContactName(event.target.value)}
+                    maxLength={120}
+                    autoComplete="name"
+                  />
+                </FormField>
+                <FormField id="booking-contact-phone" label="Phone number">
+                  <input
+                    id="booking-contact-phone"
+                    className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-base text-ink"
+                    value={contactPhone}
+                    onChange={(event) => setContactPhone(event.target.value)}
+                    maxLength={32}
+                    autoComplete="tel"
+                    inputMode="tel"
+                  />
+                </FormField>
+              </div>
               {reviewing ? (
                 <div className="mt-4 grid gap-3">
                   {error ? (
@@ -202,7 +234,12 @@ export function BookPage() {
                     clinic accepts it.
                   </p>
                   <div className="flex flex-col gap-2 sm:flex-row">
-                    <Button disabled={pending} onClick={() => void confirm(draft.slot as Slot)}>
+                    <Button
+                      disabled={
+                        pending || contactName.trim().length === 0 || contactPhone.trim().length < 7
+                      }
+                      onClick={() => void confirm(draft.slot as Slot)}
+                    >
                       {pending ? 'Booking…' : 'Confirm booking'}
                     </Button>
                     <Button
@@ -216,7 +253,12 @@ export function BookPage() {
                 </div>
               ) : (
                 <div className="mt-4">
-                  <Button onClick={() => setReviewing(true)}>Review booking</Button>
+                  <Button
+                    disabled={contactName.trim().length === 0 || contactPhone.trim().length < 7}
+                    onClick={() => setReviewing(true)}
+                  >
+                    Review booking
+                  </Button>
                 </div>
               )}
             </section>

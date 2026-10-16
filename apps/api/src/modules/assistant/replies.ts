@@ -31,10 +31,26 @@ export function describeReview(input: {
   startsAt: string;
   timeZone: string;
   moving: boolean;
+  contactName?: string | null;
+  contactPhone?: string | null;
 }) {
   const when = formatWhen(input.startsAt, input.timeZone);
   const verb = input.moving ? 'Move the visit to' : 'Book';
-  return `${verb} ${input.serviceName} at ${input.clinicName} on ${when} with ${input.staffName}. This is not saved until you confirm.`;
+  const contact =
+    input.contactName && input.contactPhone
+      ? ` Name on the visit: ${input.contactName}. Phone: ${input.contactPhone}.`
+      : '';
+  return `${verb} ${input.serviceName} at ${input.clinicName} on ${when} with ${input.staffName}.${contact} This is not saved until you confirm.`;
+}
+
+export function askForContact(missing: Array<'name' | 'phone'>) {
+  if (missing.includes('name') && missing.includes('phone')) {
+    return 'What name should appear on this visit, and what phone number can the clinic use to reach you?';
+  }
+  if (missing.includes('name')) {
+    return 'What name should appear on this visit?';
+  }
+  return 'What phone number can the clinic use to reach you?';
 }
 
 export function describeCancel(visit: AppointmentRecord, timeZone: string) {
@@ -100,6 +116,9 @@ export function suggestionsFor(state: WorkflowState, serviceNames: string[]) {
   }
   if (state.missingFields.includes('date')) {
     return ['Tomorrow', 'Next Monday'];
+  }
+  if (state.missingFields.includes('name') || state.missingFields.includes('phone')) {
+    return [];
   }
   if (state.phase === 'awaiting_slot' || state.phase === 'awaiting_reschedule_slot') {
     return [];

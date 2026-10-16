@@ -122,6 +122,8 @@ CREATE TABLE "appointments" (
     "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "idempotency_key" TEXT,
+    "patient_contact_name" TEXT,
+    "patient_phone" TEXT,
 
     CONSTRAINT "appointments_pkey" PRIMARY KEY ("id")
 );
@@ -354,6 +356,14 @@ ALTER TABLE "staff_time_off" ADD CONSTRAINT "staff_time_off_role_chk" CHECK ("st
 
 ALTER TABLE "appointments" ADD CONSTRAINT "appointments_range_chk" CHECK ("ends_at" > "starts_at");
 ALTER TABLE "appointments" ADD CONSTRAINT "appointments_cancelled_at_chk" CHECK (("status" = 'cancelled') = ("cancelled_at" IS NOT NULL));
+ALTER TABLE "appointments" ADD CONSTRAINT "appointments_patient_contact_name_chk" CHECK (
+  "patient_contact_name" IS NULL
+  OR char_length(btrim("patient_contact_name")) BETWEEN 1 AND 120
+);
+ALTER TABLE "appointments" ADD CONSTRAINT "appointments_patient_phone_chk" CHECK (
+  "patient_phone" IS NULL
+  OR char_length(btrim("patient_phone")) BETWEEN 7 AND 32
+);
 ALTER TABLE "appointments" ADD CONSTRAINT "appointments_patient_role_chk" CHECK ("patient_role" = 'patient');
 ALTER TABLE "appointments" ADD CONSTRAINT "appointments_staff_pair_chk" CHECK (("staff_user_id" IS NULL) = ("staff_role" IS NULL));
 ALTER TABLE "appointments" ADD CONSTRAINT "appointments_staff_role_chk" CHECK ("staff_role" IS NULL OR "staff_role" IN ('owner', 'staff'));

@@ -16,7 +16,9 @@ import {
 } from '../modules/assistant/model.js';
 import { parseModelIntent } from '../modules/assistant/parse-intent.js';
 import { buildSystemPrompt } from '../modules/assistant/prompt.js';
+import { absorbContactFromText } from '../modules/assistant/contact.js';
 import {
+  askForContact,
   describeBooked,
   describeCancel,
   describeChoices,
@@ -31,7 +33,12 @@ import {
   suggestionsFor,
 } from '../modules/assistant/replies.js';
 import { clinicDate, filterSlots, resolveBookingDetails } from '../modules/assistant/resolve.js';
-import { applyExtraction, emptyWorkflow, readWorkflow } from '../modules/assistant/workflow.js';
+import {
+  applyExtraction,
+  contactMissing,
+  emptyWorkflow,
+  readWorkflow,
+} from '../modules/assistant/workflow.js';
 import { AppError, NotFoundError } from '../errors/app-error.js';
 import {
   ConfirmationRequiredError,
@@ -194,21 +201,13 @@ export function createAssistantService(deps: {
       }
       const label = await lookupServiceName(loaded.clinic.id, loaded.workflow.serviceId);
       const moving = loaded.workflow.phase === 'awaiting_reschedule_slot';
-      const workflow: WorkflowState = {
-        ...loaded.workflow,
-        selectedSlot: slot,
-        phase: moving ? 'awaiting_reschedule_confirmation' : 'awaiting_confirmation',
-        confirmationState: 'required',
-      };
-      const reply = describeReview({
-        clinicName: loaded.clinic.name,
-        serviceName: label,
-        staffName: slot.staffName,
-        startsAt: slot.startsAt,
-        timeZone: loaded.clinic.timezone,
-        moving,
-      });
-      const stored = await storeWorkflow(loaded.session.id, workflow, undefined, true);
+      const drafted = draftSlotSelection(loaded.workflow, slot, moving);
+      const reply = await reviewOrContactReply(loaded, drafted, label, moving);
+      const outcome = drafted.phase === 'awaiting_confirmation' ||
+        drafted.phase === 'awaiting_reschedule_confirmation'
+        ? ('review' as const)
+        : ('reply' as const);
+      const stored = await storeWorkflow(loaded.session.id, drafted, undefined, true);
       if (!stored) {
         const fresh = await loadOwned(actorUserId, sessionId);
         const stillChoosing =
@@ -218,12 +217,7 @@ export function createAssistantService(deps: {
         if (!stillChoosing) {
           return replayTurn(actorUserId, fresh);
         }
-        const retry: WorkflowState = {
-          ...fresh.workflow,
-          selectedSlot: slot,
-          phase: moving ? 'awaiting_reschedule_confirmation' : 'awaiting_confirmation',
-          confirmationState: 'required',
-        };
+        const retry = draftSlotSelection(fresh.workflow, slot, moving);
         const retried = await storeWorkflow(loaded.session.id, retry, undefined, false);
         if (!retried) {
           return replayTurn(actorUserId, await loadOwned(actorUserId, sessionId));
@@ -233,9 +227,13 @@ export function createAssistantService(deps: {
           ...fresh,
           workflow: retried,
           messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
-          outcome: 'review',
+          outcome:
+            retry.phase === 'awaiting_confirmation' ||
+            retry.phase === 'awaiting_reschedule_confirmation'
+              ? 'review'
+              : 'reply',
           appointment: null,
-          suggestions: [],
+          suggestions: suggestionsFor(retried, []),
         });
       }
       await appendAssistantMessage(loaded, reply);
@@ -243,9 +241,9 @@ export function createAssistantService(deps: {
         ...loaded,
         workflow: stored,
         messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
-        outcome: 'review',
+        outcome,
         appointment: null,
-        suggestions: [],
+        suggestions: suggestionsFor(stored, []),
       });
     },
 
@@ -278,6 +276,26 @@ export function createAssistantService(deps: {
           loaded.workflow.selectedSlot &&
           loaded.workflow.serviceId
         ) {
+          const missing = contactMissing(loaded.workflow);
+          if (missing.length > 0) {
+            const workflow: WorkflowState = {
+              ...loaded.workflow,
+              phase: 'collecting',
+              missingFields: missing,
+              confirmationState: 'required',
+            };
+            const stored = await storeWorkflow(loaded.session.id, workflow, undefined, false);
+            const current = stored ?? workflow;
+            await appendAssistantMessage(loaded, askForContact(missing));
+            return present({
+              ...loaded,
+              workflow: current,
+              messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
+              outcome: 'reply',
+              appointment: null,
+              suggestions: suggestionsFor(current, []),
+            });
+          }
           const created = await deps.scheduling.createAppointment({
             clinicId: loaded.clinic.id,
             timeZone: loaded.clinic.timezone,
@@ -286,6 +304,8 @@ export function createAssistantService(deps: {
               serviceId: loaded.workflow.serviceId,
               staffUserId: loaded.workflow.selectedSlot.staffUserId,
               startsAt: loaded.workflow.selectedSlot.startsAt,
+              patientContactName: loaded.workflow.contactName!,
+              patientPhone: loaded.workflow.contactPhone!,
             },
             idempotencyKey: assistantKey(loaded.session.id, loaded.workflow.selectedSlot.startsAt),
           });
@@ -337,18 +357,20 @@ export function createAssistantService(deps: {
     loaded: Owned,
     catalog: Catalog,
     today: string,
+    text: string,
     extracted: ModelIntent,
     interaction: Interaction,
   ) {
     const applied = applyExtraction(loaded.workflow, extracted);
+    const withContact = absorbContactFromText(applied.state, text);
     const details = resolveBookingDetails({
-      state: applied.state,
+      state: withContact,
       services: catalog.services,
       staff: catalog.staff,
       today,
     });
     let workflow: WorkflowState = {
-      ...applied.state,
+      ...withContact,
       serviceId: details.serviceId,
       date: details.date,
       staffUserId: details.staffUserId,
@@ -365,6 +387,54 @@ export function createAssistantService(deps: {
       return finish(loaded, {
         workflow: loaded.workflow,
         reply: 'Nothing is saved yet. Use the confirmation card, or tell me what to change.',
+        outcome: 'review',
+        interaction,
+      });
+    }
+
+    if (
+      workflow.selectedSlot &&
+      workflow.intent === 'book' &&
+      !applied.preferenceChanged
+    ) {
+      const missing = contactMissing(workflow);
+      if (missing.length > 0) {
+        workflow = { ...workflow, phase: 'collecting', missingFields: missing };
+        return finish(loaded, {
+          workflow,
+          reply: askForContact(missing),
+          outcome: 'reply',
+          interaction,
+        });
+      }
+      const slot = workflow.selectedSlot;
+      if (!slot) {
+        return finish(loaded, {
+          workflow,
+          reply: askForContact(['name', 'phone']),
+          outcome: 'reply',
+          interaction,
+        });
+      }
+      const label = await lookupServiceName(loaded.clinic.id, workflow.serviceId);
+      workflow = {
+        ...workflow,
+        phase: 'awaiting_confirmation',
+        missingFields: [],
+        confirmationState: 'required',
+      };
+      return finish(loaded, {
+        workflow,
+        reply: describeReview({
+          clinicName: loaded.clinic.name,
+          serviceName: label,
+          staffName: slot.staffName,
+          startsAt: slot.startsAt,
+          timeZone: loaded.clinic.timezone,
+          moving: false,
+          contactName: workflow.contactName,
+          contactPhone: workflow.contactPhone,
+        }),
         outcome: 'review',
         interaction,
       });
@@ -415,6 +485,64 @@ export function createAssistantService(deps: {
       reply: searched.reply,
       outcome: searched.outcome,
       interaction,
+    });
+  }
+
+  function draftSlotSelection(
+    workflow: WorkflowState,
+    slot: NonNullable<WorkflowState['selectedSlot']>,
+    moving: boolean,
+  ): WorkflowState {
+    const next: WorkflowState = {
+      ...workflow,
+      selectedSlot: slot,
+      confirmationState: 'required',
+    };
+    if (moving) {
+      return {
+        ...next,
+        phase: 'awaiting_reschedule_confirmation',
+        missingFields: [],
+      };
+    }
+    const missing = contactMissing(next);
+    if (missing.length > 0) {
+      return {
+        ...next,
+        phase: 'collecting',
+        missingFields: missing,
+      };
+    }
+    return {
+      ...next,
+      phase: 'awaiting_confirmation',
+      missingFields: [],
+    };
+  }
+
+  async function reviewOrContactReply(
+    loaded: Owned,
+    workflow: WorkflowState,
+    serviceName: string,
+    moving: boolean,
+  ) {
+    const missing = contactMissing(workflow);
+    if (!moving && missing.length > 0) {
+      return askForContact(missing);
+    }
+    const slot = workflow.selectedSlot;
+    if (!slot) {
+      return askForContact(['name', 'phone']);
+    }
+    return describeReview({
+      clinicName: loaded.clinic.name,
+      serviceName,
+      staffName: slot.staffName,
+      startsAt: slot.startsAt,
+      timeZone: loaded.clinic.timezone,
+      moving,
+      contactName: workflow.contactName,
+      contactPhone: workflow.contactPhone,
     });
   }
 
@@ -809,6 +937,50 @@ export function createAssistantService(deps: {
 
     const catalog = await catalogFor(loaded.clinic);
     const today = clinicDate(now(), loaded.clinic.timezone);
+    if (
+      loaded.workflow.selectedSlot &&
+      loaded.workflow.intent === 'book' &&
+      contactMissing(loaded.workflow).length > 0
+    ) {
+      const absorbed = absorbContactFromText(loaded.workflow, text);
+      if (
+        absorbed.contactName !== loaded.workflow.contactName ||
+        absorbed.contactPhone !== loaded.workflow.contactPhone
+      ) {
+        return respondFromIntent(
+          actorUserId,
+          loaded,
+          catalog,
+          today,
+          text,
+          {
+            intent: 'book',
+            serviceQuery: null,
+            datePreference: null,
+            timePreference: null,
+            staffQuery: null,
+            contactName: absorbed.contactName,
+            contactPhone: absorbed.contactPhone,
+            missingFields: contactMissing(absorbed),
+            needsClarification: contactMissing(absorbed).length > 0,
+            clarificationQuestion: null,
+            proposedAction: 'ask',
+            confirmationState: 'required',
+            emergency: false,
+            topic: null,
+          },
+          {
+            purpose: 'grounded_contact',
+            model: 'careflow-catalog',
+            promptTokens: 0,
+            completionTokens: 0,
+            latencyMs: 0,
+            status: 'succeeded',
+            errorCode: null,
+          },
+        );
+      }
+    }
     const grounded = groundMessage({
       text,
       workflow: loaded.workflow,
@@ -817,7 +989,7 @@ export function createAssistantService(deps: {
       today,
     });
     if (grounded) {
-      return respondFromIntent(actorUserId, loaded, catalog, today, grounded, {
+      return respondFromIntent(actorUserId, loaded, catalog, today, text, grounded, {
         purpose: 'grounded_detail',
         model: 'careflow-catalog',
         promptTokens: 0,
@@ -928,6 +1100,7 @@ export function createAssistantService(deps: {
       loaded,
       catalog,
       today,
+      text,
       parsed.intent,
       metric(completion, 'succeeded', null),
     );
@@ -984,8 +1157,11 @@ export function createAssistantService(deps: {
 
     const workflow: WorkflowState = {
       ...input.workflow,
-      turnSettled: false,
-      turnOutcome: input.workflow.turnOutcome,
+      turnKey: loaded.workflow.turnKey,
+      turnClaim: null,
+      turnClaimedAt: null,
+      turnSettled: loaded.workflow.turnSettled,
+      turnOutcome: loaded.workflow.turnOutcome,
     };
     const stored = await storeWorkflow(loaded.session.id, workflow, undefined, false);
     await deps.repository.appendMessage({

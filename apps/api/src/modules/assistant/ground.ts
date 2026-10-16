@@ -81,6 +81,8 @@ function detailIntent(
     datePreference: fields.datePreference ?? null,
     timePreference: null,
     staffQuery: fields.staffQuery ?? null,
+    contactName: null,
+    contactPhone: null,
     missingFields: [],
     needsClarification: false,
     clarificationQuestion: null,

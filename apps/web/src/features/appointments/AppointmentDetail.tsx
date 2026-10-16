@@ -33,6 +33,12 @@ export function AppointmentDetail({
         <Detail label="Length" value={`${appointment.durationMinutes} min`} />
         <Detail label="Staff" value={appointment.staffName} />
         <Detail label="Clinic" value={appointment.clinicName} />
+        {appointment.patientContactName ? (
+          <Detail label="Patient" value={appointment.patientContactName} />
+        ) : null}
+        {appointment.patientPhone ? (
+          <Detail label="Phone" value={appointment.patientPhone} />
+        ) : null}
         {appointment.cancelledAt ? (
           <Detail label="Cancelled" value={formatVisitTime(appointment.cancelledAt, timeZone)} />
         ) : null}

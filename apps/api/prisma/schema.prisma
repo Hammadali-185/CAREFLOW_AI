@@ -192,6 +192,8 @@ model Appointment {
   cancelledAt                  DateTime?         @map("cancelled_at") @db.Timestamptz(6)
   rescheduledFromAppointmentId String?           @map("rescheduled_from_appointment_id") @db.Uuid
   idempotencyKey               String?           @map("idempotency_key")
+  patientContactName           String?           @map("patient_contact_name")
+  patientPhone                 String?           @map("patient_phone")
   createdAt                    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                    DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 

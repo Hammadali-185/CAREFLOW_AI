@@ -52,6 +52,7 @@ beforeAll(async () => {
     'apps/api/prisma/migrations/20261014210000_domain_model/migration.sql',
     'apps/api/prisma/migrations/20261014223000_appointment_idempotency/migration.sql',
     'apps/api/prisma/migrations/20261015010000_chat_workflow_state/migration.sql',
+    'apps/api/prisma/migrations/20261016190000_appointment_contact/migration.sql',
   ]) {
     await database.exec(readFileSync(resolve(repoRoot, file), 'utf8'));
   }
@@ -177,17 +178,24 @@ describe('assistant booking', () => {
     expect(await prisma.appointment.count()).toBe(0);
 
     const slot = asked.body.workflow.offeredSlots[0];
-    const review = await request(app)
+    const askedContact = await request(app)
       .post(`/api/assistant/sessions/${session}/slots`)
       .set(CARE_FLOW_REQUEST_HEADER, '1')
       .set(CSRF_HEADER, patient.csrf)
       .set('Cookie', patient.cookie)
       .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    expect(askedContact.status).toBe(200);
+    expect(askedContact.body.outcome).toBe('reply');
+    expect(askedContact.body.appointment).toBeNull();
+    expect(askedContact.body.messages.at(-1).body).toMatch(/name|phone/i);
+    expect(await prisma.appointment.count()).toBe(0);
+
+    const review = await say(patient, session, 'Fatima Noor, 555-010-2345');
     expect(review.status).toBe(200);
     expect(review.body.outcome).toBe('review');
-    expect(review.body.appointment).toBeNull();
     expect(review.body.messages.at(-1).body).toContain('North Clinic');
-    expect(await prisma.appointment.count()).toBe(0);
+    expect(review.body.messages.at(-1).body).toMatch(/Fatima Noor/);
+    expect(review.body.messages.at(-1).body).toMatch(/555-010-2345/);
 
     const confirmed = await confirm(patient, session);
     expect(confirmed.status).toBe(200);
@@ -195,6 +203,8 @@ describe('assistant booking', () => {
     expect(confirmed.body.appointment.status).toBe('confirmed');
     expect(confirmed.body.appointment.serviceId).toBe(serviceId);
     expect(confirmed.body.appointment.startsAt).toBe(slot.startsAt);
+    expect(confirmed.body.appointment.patientContactName).toBe('Fatima Noor');
+    expect(confirmed.body.appointment.patientPhone).toBe('555-010-2345');
     expect(await prisma.appointment.count({ where: { id: confirmed.body.appointment.id } })).toBe(
       1,
     );
@@ -389,12 +399,7 @@ describe('assistant booking', () => {
     );
     const slots = await say(patient, session, 'Book a follow-up Friday morning');
     const slot = slots.body.workflow.offeredSlots[0];
-    await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    await chooseSlot(patient, session, slot);
     const booked = await confirm(patient, session);
     expect(booked.body.outcome).toBe('booked');
 
@@ -411,12 +416,7 @@ describe('assistant booking', () => {
     expect(move.body.appointment).toBeNull();
     expect(move.body.outcome).toBe('slots');
     const next = move.body.workflow.offeredSlots.at(-1);
-    await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: next.staffUserId, startsAt: next.startsAt });
+    await chooseSlot(patient, session, next);
     const moved = await confirm(patient, session);
     expect(moved.body.outcome).toBe('rescheduled');
     expect(moved.body.appointment.startsAt).toBe(next.startsAt);
@@ -551,12 +551,7 @@ describe('assistant booking', () => {
     }
 
     const slot = asked.body.workflow.offeredSlots[0];
-    const review = await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    const review = await chooseSlot(patient, session, slot);
     expect(review.body.outcome).toBe('review');
     expect(review.body.appointment).toBeNull();
     expect(review.body.messages.at(-1).body).toMatch(/not saved until you confirm/i);
@@ -599,6 +594,7 @@ describe('assistant booking', () => {
     );
     expect(userMessages.map((message: { body: string }) => message.body)).toEqual([
       'I need a follow-up next Thursday morning.',
+      'Fatima Noor, 555-010-2345',
       'What services does this clinic offer?',
       'Can I come earlier that day?',
     ]);
@@ -611,7 +607,7 @@ describe('assistant booking', () => {
       retried.body.messages.filter(
         (message: { senderKind: string }) => message.senderKind === 'user',
       ),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(await prisma.appointment.count()).toBe(beforeLimit);
   });
 
@@ -659,12 +655,7 @@ describe('assistant booking', () => {
     expect(asked.body.outcome).toBe('slots');
     expect(asked.body.appointment).toBeNull();
     const slot = asked.body.workflow.offeredSlots[0];
-    await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    await chooseSlot(patient, session, slot);
     const confirmed = await confirm(patient, session);
     expect(confirmed.body.outcome).toBe('booked');
     const booked = await prisma.appointment.count();
@@ -932,12 +923,7 @@ describe('assistant booking', () => {
     const before = await prisma.appointment.count();
     const asked = await askForSlots(patient, session);
     const slot = asked.body.workflow.offeredSlots[0];
-    const review = await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    const review = await chooseSlot(patient, session, slot);
     expect(review.status).toBe(200);
     let releaseSave: () => void = () => {};
     let saveEntered: () => void = () => {};
@@ -1002,12 +988,7 @@ describe('assistant booking', () => {
     const before = await prisma.appointment.count();
     const asked = await askForSlots(patient, session);
     const slot = asked.body.workflow.offeredSlots[0];
-    const review = await request(app)
-      .post(`/api/assistant/sessions/${session}/slots`)
-      .set(CARE_FLOW_REQUEST_HEADER, '1')
-      .set(CSRF_HEADER, patient.csrf)
-      .set('Cookie', patient.cookie)
-      .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+    const review = await chooseSlot(patient, session, slot);
     expect(review.status).toBe(200);
     let saves = 0;
     let releaseSave: () => void = () => {};
@@ -1217,13 +1198,7 @@ async function bookVisit(patient: Session, session: string) {
   });
   const asked = await askForSlots(patient, session);
   const slot = asked.body.workflow.offeredSlots[0];
-  const review = await request(app)
-    .post(`/api/assistant/sessions/${session}/slots`)
-    .set(CARE_FLOW_REQUEST_HEADER, '1')
-    .set(CSRF_HEADER, patient.csrf)
-    .set('Cookie', patient.cookie)
-    .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
-  expect(review.status).toBe(200);
+  await chooseSlot(patient, session, slot);
   const booked = await confirm(patient, session);
   expect(booked.status).toBe(200);
   expect(booked.body.outcome).toBe('booked');
@@ -1300,6 +1275,28 @@ async function askForSlots(patient: Session, session: string) {
   expect(asked.status).toBe(200);
   expect(asked.body.outcome).toBe('slots');
   return asked;
+}
+
+async function chooseSlot(
+  patient: Session,
+  session: string,
+  slot: { staffUserId: string; startsAt: string },
+) {
+  const selected = await request(app)
+    .post(`/api/assistant/sessions/${session}/slots`)
+    .set(CARE_FLOW_REQUEST_HEADER, '1')
+    .set(CSRF_HEADER, patient.csrf)
+    .set('Cookie', patient.cookie)
+    .send({ staffUserId: slot.staffUserId, startsAt: slot.startsAt });
+  expect(selected.status).toBe(200);
+  if (selected.body.outcome === 'review') {
+    return selected;
+  }
+  expect(selected.body.outcome).toBe('reply');
+  const review = await say(patient, session, 'Fatima Noor, 555-010-2345');
+  expect(review.status).toBe(200);
+  expect(review.body.outcome).toBe('review');
+  return review;
 }
 
 async function workflowOf(sessionId: string) {

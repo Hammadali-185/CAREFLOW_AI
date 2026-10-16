@@ -91,6 +91,7 @@ describe('booking confirmation', () => {
     await user.selectOptions(await screen.findByLabelText('Service'), serviceId);
     fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2026-10-20' } });
     await user.click(await screen.findByRole('button', { name: /hamza qureshi/i }));
+    await user.type(screen.getByLabelText('Phone number'), '555-010-2345');
     await user.click(screen.getByRole('button', { name: 'Review booking' }));
     await user.click(screen.getByRole('button', { name: 'Confirm booking' }));
 

@@ -314,6 +314,7 @@ export function ClinicDeskPage() {
                   <thead>
                     <tr className="text-sm text-ink-soft">
                       <th className="px-3 font-semibold">When</th>
+                      <th className="px-3 font-semibold">Patient</th>
                       <th className="px-3 font-semibold">Service</th>
                       <th className="px-3 font-semibold">Staff</th>
                       <th className="px-3 font-semibold">Status</th>
@@ -419,6 +420,12 @@ function ScheduleTableRow({
     <tr className="bg-white">
       <td className="rounded-l-md border-y border-l border-line px-3 py-3 whitespace-nowrap">
         {formatVisitTime(appointment.startsAt, timeZone)}
+      </td>
+      <td className="border-y border-line px-3 py-3">
+        <div>{appointment.patientContactName ?? '—'}</div>
+        {appointment.patientPhone ? (
+          <div className="text-sm text-ink-soft">{appointment.patientPhone}</div>
+        ) : null}
       </td>
       <td className="border-y border-line px-3 py-3">{appointment.serviceName}</td>
       <td className="border-y border-line px-3 py-3">{appointment.staffName}</td>

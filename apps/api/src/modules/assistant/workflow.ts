@@ -14,6 +14,8 @@ export function emptyWorkflow(): WorkflowState {
     appointmentId: null,
     offeredSlots: [],
     selectedSlot: null,
+    contactName: null,
+    contactPhone: null,
     missingFields: [],
     confirmationState: 'not_required',
     turnKey: null,
@@ -80,6 +82,12 @@ export function applyExtraction(previous: WorkflowState, extracted: ModelIntent)
       preferenceChanged = true;
     }
   }
+  if (typeof extracted.contactName === 'string' && extracted.contactName.trim().length > 0) {
+    next.contactName = extracted.contactName.trim().slice(0, 120);
+  }
+  if (typeof extracted.contactPhone === 'string' && extracted.contactPhone.trim().length > 0) {
+    next.contactPhone = extracted.contactPhone.trim().slice(0, 32);
+  }
 
   if (previous.phase === 'completed') {
     next.phase = 'collecting';
@@ -120,7 +128,20 @@ export function workflowSummary(state: WorkflowState) {
     `date=${state.datePreference ?? 'unknown'}`,
     `time=${state.timePreference ?? 'unknown'}`,
     `staff=${state.staffQuery ?? 'unknown'}`,
+    `name=${state.contactName ?? 'unknown'}`,
+    `phone=${state.contactPhone ?? 'unknown'}`,
   ].join('; ');
+}
+
+export function contactMissing(state: WorkflowState): Array<'name' | 'phone'> {
+  const missing: Array<'name' | 'phone'> = [];
+  if (!state.contactName || state.contactName.trim().length === 0) {
+    missing.push('name');
+  }
+  if (!state.contactPhone || state.contactPhone.trim().length < 7) {
+    missing.push('phone');
+  }
+  return missing;
 }
 
 function isAnyStaff(value: string) {

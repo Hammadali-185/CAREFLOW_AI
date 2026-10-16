@@ -22,6 +22,8 @@ const appointmentSelect = {
   cancelledAt: true,
   idempotencyKey: true,
   rescheduledFromAppointmentId: true,
+  patientContactName: true,
+  patientPhone: true,
 } satisfies Prisma.AppointmentSelect;
 
 type AppointmentRow = Prisma.AppointmentGetPayload<{ select: typeof appointmentSelect }>;
@@ -135,6 +137,8 @@ type BookInput = {
   idempotencyKey: string | null;
   actorUserId: string;
   now: Date;
+  patientContactName: string | null;
+  patientPhone: string | null;
   excludeAppointmentId?: string;
 };
 
@@ -269,6 +273,8 @@ export function createPrismaSchedulingRepository(prisma: PrismaClient): Scheduli
             startsAt: input.startsAt,
             endsAt: input.endsAt,
             idempotencyKey: input.idempotencyKey,
+            patientContactName: input.patientContactName,
+            patientPhone: input.patientPhone,
           },
           select: appointmentSelect,
         });
@@ -365,6 +371,8 @@ export function createPrismaSchedulingRepository(prisma: PrismaClient): Scheduli
             startsAt: input.startsAt,
             endsAt: input.endsAt,
             rescheduledFromAppointmentId: input.appointmentId,
+            patientContactName: input.patientContactName,
+            patientPhone: input.patientPhone,
           },
           select: appointmentSelect,
         });
@@ -542,6 +550,8 @@ async function hydrateAppointments(
       startsAt: row.startsAt.toISOString(),
       endsAt: row.endsAt.toISOString(),
       cancelledAt: row.cancelledAt?.toISOString() ?? null,
+      patientContactName: row.patientContactName,
+      patientPhone: row.patientPhone,
       idempotencyKey: row.idempotencyKey,
     };
   });
