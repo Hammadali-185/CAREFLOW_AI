@@ -255,25 +255,29 @@ export function createSchedulingService(deps: {
       );
     },
     async cancel(actorUserId, appointmentId) {
-      const current = await requireEditableAccess(
-        repository,
-        actorUserId,
-        appointmentId,
-        now(),
-        true,
-      );
+      const current = await requireAppointmentAccess(repository, actorUserId, appointmentId);
+      if (current.status === 'cancelled') {
+        return toPublic(current);
+      }
+      if (!isChangeable(current, now())) {
+        throw new AppointmentNotEligibleError();
+      }
       const cancelled = await repository.cancel(current.id, actorUserId, now());
       return toPublic(cancelled);
     },
     async reschedule(actorUserId, appointmentId, body) {
-      const current = await requireEditableAccess(
-        repository,
-        actorUserId,
-        appointmentId,
-        now(),
-        true,
-      );
+      const current = await requireAppointmentAccess(repository, actorUserId, appointmentId);
       const startsAt = parseInstant(body.startsAt);
+      if (current.status === 'cancelled') {
+        const moved = await repository.findRescheduledFrom(current.id);
+        if (moved) {
+          return toPublic(moved);
+        }
+        throw new AppointmentNotEligibleError();
+      }
+      if (!isChangeable(current, now())) {
+        throw new AppointmentNotEligibleError();
+      }
       const staff = await requirePractitioner(repository, current.clinicId, body.staffUserId);
       if (staff.userId === current.patientUserId) {
         throw new SlotUnavailableError();
@@ -300,6 +304,13 @@ export function createSchedulingService(deps: {
         return toPublic(moved);
       } catch (error) {
         if (error instanceof SlotTakenError || error instanceof SlotUnavailableError) {
+          throw error;
+        }
+        if (error instanceof AppointmentNotEligibleError) {
+          const moved = await repository.findRescheduledFrom(current.id);
+          if (moved) {
+            return toPublic(moved);
+          }
           throw error;
         }
         if (isOverlapConflict(error)) {
@@ -463,6 +474,18 @@ async function requireEditableAccess(
   instant: Date,
   mustBeChangeable: boolean,
 ) {
+  const appointment = await requireAppointmentAccess(repository, actorUserId, appointmentId);
+  if (mustBeChangeable && !isChangeable(appointment, instant)) {
+    throw new AppointmentNotEligibleError();
+  }
+  return appointment;
+}
+
+async function requireAppointmentAccess(
+  repository: SchedulingRepository,
+  actorUserId: string,
+  appointmentId: string,
+) {
   const appointment = await repository.findById(appointmentId);
   if (!appointment) {
     throw new NotFoundError('That appointment was not found.');
@@ -472,9 +495,6 @@ async function requireEditableAccess(
   const isStaff = role === 'owner' || role === 'staff';
   if (!isPatient && !isStaff) {
     throw new ForbiddenError();
-  }
-  if (mustBeChangeable && !isChangeable(appointment, instant)) {
-    throw new AppointmentNotEligibleError();
   }
   return appointment;
 }

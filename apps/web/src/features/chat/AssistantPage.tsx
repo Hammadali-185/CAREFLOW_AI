@@ -1,6 +1,6 @@
 import type { AssistantTurn, Slot } from '@careflow/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ErrorState } from '../../components/feedback/ErrorState';
 import { LoadingSkeleton } from '../../components/feedback/LoadingSkeleton';
@@ -32,6 +32,7 @@ export function AssistantPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [retryText, setRetryText] = useState<string | null>(null);
+  const turnKey = useRef<string | null>(null);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   useDocumentTitle('Assistant');
@@ -88,7 +89,7 @@ export function AssistantPage() {
     }
   }
 
-  async function send(text: string) {
+  async function send(text: string, reuse = false) {
     if (!sessionId || !auth.csrfToken) {
       setNotice('Start a conversation before sending a message.');
       return;
@@ -97,10 +98,15 @@ export function AssistantPage() {
     if (!outgoing) {
       return;
     }
+    const key = reuse && turnKey.current ? turnKey.current : createTurnKey();
+    turnKey.current = key;
     setPending(true);
     setNotice(null);
     try {
-      const next = await api.postAssistantMessage(sessionId, outgoing, auth.csrfToken);
+      const next = await api.postAssistantMessage(sessionId, outgoing, auth.csrfToken, {
+        retry: reuse,
+        turnKey: key,
+      });
       await queryClient.cancelQueries({ queryKey: ['assistant-session', sessionId] });
       queryClient.setQueryData(['assistant-session', sessionId], next);
       setDraft('');
@@ -109,9 +115,11 @@ export function AssistantPage() {
         setNotice(next.messages.at(-1)?.body ?? 'The assistant could not answer.');
       } else {
         setRetryText(null);
+        turnKey.current = null;
       }
     } catch (error) {
       setDraft(outgoing);
+      setRetryText(outgoing);
       setNotice(error instanceof ApiError ? error.message : 'That message was not sent.');
     } finally {
       setPending(false);
@@ -154,11 +162,11 @@ export function AssistantPage() {
   }
 
   const saved =
-    turn?.appointment &&
-    (turn.outcome === 'booked' ||
-      turn.outcome === 'cancelled' ||
-      turn.outcome === 'rescheduled' ||
-      (turn.outcome === 'loaded' && turn.workflow.phase === 'completed'));
+    Boolean(turn?.appointment) &&
+    (turn?.outcome === 'booked' ||
+      turn?.outcome === 'cancelled' ||
+      turn?.outcome === 'rescheduled' ||
+      turn?.workflow.phase === 'completed');
   const choosing =
     turn?.workflow.phase === 'awaiting_slot' || turn?.workflow.phase === 'awaiting_reschedule_slot';
   const reviewing =
@@ -285,13 +293,17 @@ export function AssistantPage() {
             ) : null}
             {notice ? (
               <AssistantNotice
-                title="The assistant did not finish"
+                title={
+                  retryText
+                    ? 'The assistant is temporarily unavailable'
+                    : 'The assistant did not finish'
+                }
                 message={notice}
                 formHref={formHref}
                 onRetry={
                   retryText || draft
                     ? () => {
-                        void send(retryText || draft);
+                        void send(retryText || draft, Boolean(retryText));
                       }
                     : undefined
                 }
@@ -333,6 +345,10 @@ export function AssistantPage() {
       </div>
     </PageContainer>
   );
+}
+
+function createTurnKey() {
+  return crypto.randomUUID().replace(/-/g, '');
 }
 
 function bookingHref(turn: AssistantTurn | undefined) {

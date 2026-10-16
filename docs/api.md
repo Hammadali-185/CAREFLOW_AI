@@ -156,7 +156,7 @@ In production, unexpected errors return the message `Something went wrong.` The 
 | `LOG_LEVEL`          | no       | `debug`, `info`, `warn`, or `error`                                                                                 |
 | `PG_POOL_MAX`        | no       | Positive integer pool size. The local PGlite socket used for tests needs `1` because it serves one query at a time. |
 | `MISTRAL_API_KEY`    | no       | Mistral key for the scheduling assistant. The API starts without it.                                                |
-| `MISTRAL_MODEL`      | no       | Model name, default `ministral-3b-latest`                                                                           |
+| `MISTRAL_MODEL`      | no       | Model name, default `mistral-small-latest`                                                                          |
 | `MISTRAL_TIMEOUT_MS` | no       | Provider timeout, default `20000`                                                                                   |
 
 Missing or invalid required values stop the process before it listens. The validation error names the variable and does not print the database URL.
@@ -224,9 +224,9 @@ Appointment JSON includes the clinic, service, staff, status, and instants. It d
 
 ## Scheduling assistant
 
-The browser never calls Mistral. `POST /api/assistant/sessions/:sessionId/messages` stores the patient message, sends a bounded history to Mistral, and validates the JSON with a strict Zod schema. Extra keys, SQL, or tool fields are rejected. The model cannot create an appointment. Slot search, cancellation, and rescheduling go through the booking service, and only after the patient sends `POST /api/assistant/sessions/:sessionId/slots` and then `POST .../confirm` with `{ "confirmed": true }`.
+The browser never calls Mistral. `POST /api/assistant/sessions/:sessionId/messages` stores the patient message. A whole message that exactly matches one active service, one staff name, or one date the scheduler already understands is applied to the saved workflow without a model call. Other messages go to Mistral with a bounded history. The reply must be the strict intent schema. Extra keys, SQL, or tool fields are rejected. `topic` may be omitted and defaults to null. The model cannot create an appointment. Slot search, cancellation, and rescheduling go through the booking service, and only after the patient sends `POST /api/assistant/sessions/:sessionId/slots` and then `POST .../confirm` with `{ "confirmed": true }`.
 
-A missing key, timeout, rate limit, or invalid model reply is stored as assistant text with `outcome` `unavailable` or `invalid_output`. The visit count does not change. Logs record purpose, model, latency, token counts, and an error code. They do not record the message, the prompt, or the API key.
+A missing key, timeout, provider authentication failure, rate limit, or invalid model reply is stored as assistant text with `outcome` `unavailable` or `invalid_output`. The workflow and the patient message stay. Retryable provider failures are attempted at most three times inside the request budget. The browser sends a `turnKey` of 8 to 80 letters, numbers, underscores, or hyphens with the message. The API claims that key on the session row before it calls the model, then releases the database transaction. A second request with the same key waits for that claim or, if the wait ends first, returns without another model call or another user message. `{ "retry": true }` runs the saved message again only when the saved outcome is `unavailable` or `invalid_output` and no claim is still active. The previous failure outcome stays stored until the replacement reply is committed. A claim left behind by a crash can be taken over after 90 seconds without inserting another user message. The visit count does not change. Logs record purpose, model, latency, token counts, an error code, and the provider status. They do not record the message, the prompt, or the API key.
 
 Possible emergencies get a direction to emergency care and are not booked. The assistant does not diagnose.
 

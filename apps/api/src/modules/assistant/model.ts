@@ -16,12 +16,18 @@ export type ModelClient = {
 };
 
 export class ModelRequestError extends Error {
-  readonly code: 'MISSING_API_KEY' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNAVAILABLE';
+  readonly code: 'MISSING_API_KEY' | 'TIMEOUT' | 'RATE_LIMITED' | 'PROVIDER_AUTH' | 'UNAVAILABLE';
+  readonly providerStatus: number | null;
 
-  constructor(code: ModelRequestError['code'], message: string) {
+  constructor(
+    code: ModelRequestError['code'],
+    message: string,
+    providerStatus: number | null = null,
+  ) {
     super(message);
     this.name = 'ModelRequestError';
     this.code = code;
+    this.providerStatus = providerStatus;
   }
 }
 

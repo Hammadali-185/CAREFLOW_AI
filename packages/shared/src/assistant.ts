@@ -29,6 +29,8 @@ export const assistantProposedActionSchema = z.enum([
 
 export const assistantConfirmationStateSchema = z.enum(['not_required', 'required']);
 
+export const assistantTopicSchema = z.enum(['services', 'schedule', 'policy']);
+
 export const modelIntentSchema = z
   .object({
     intent: assistantIntentNameSchema,
@@ -42,6 +44,7 @@ export const modelIntentSchema = z
     proposedAction: assistantProposedActionSchema,
     confirmationState: assistantConfirmationStateSchema,
     emergency: z.boolean(),
+    topic: assistantTopicSchema.nullable().default(null),
   })
   .strict();
 
@@ -53,6 +56,20 @@ export const assistantPhaseSchema = z.enum([
   'awaiting_reschedule_slot',
   'awaiting_reschedule_confirmation',
   'completed',
+]);
+
+export const assistantOutcomeSchema = z.enum([
+  'loaded',
+  'reply',
+  'slots',
+  'review',
+  'booked',
+  'cancelled',
+  'rescheduled',
+  'listed',
+  'invalid_output',
+  'unavailable',
+  'emergency',
 ]);
 
 export const workflowStateSchema = z.object({
@@ -70,6 +87,16 @@ export const workflowStateSchema = z.object({
   selectedSlot: slotSchema.nullable(),
   missingFields: z.array(assistantMissingFieldSchema).max(5),
   confirmationState: assistantConfirmationStateSchema,
+  turnKey: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{8,80}$/)
+    .nullable()
+    .default(null),
+  turnClaim: z.string().min(1).max(80).nullable().default(null),
+  turnClaimedAt: z.string().min(1).max(40).nullable().default(null),
+  turnSettled: z.boolean().default(false),
+  turnOutcome: assistantOutcomeSchema.nullable().default(null),
+  revision: z.number().int().nonnegative().default(0),
 });
 
 export const assistantMessageSchema = z.object({
@@ -92,20 +119,6 @@ export const assistantSessionListSchema = z.object({
   sessions: z.array(assistantSessionSchema),
 });
 
-export const assistantOutcomeSchema = z.enum([
-  'loaded',
-  'reply',
-  'slots',
-  'review',
-  'booked',
-  'cancelled',
-  'rescheduled',
-  'listed',
-  'invalid_output',
-  'unavailable',
-  'emergency',
-]);
-
 export const assistantTurnSchema = z.object({
   session: assistantSessionSchema,
   messages: z.array(assistantMessageSchema),
@@ -121,6 +134,14 @@ export const assistantTurnSchema = z.object({
 
 export const assistantMessageRequestSchema = z.object({
   text: z.string().trim().min(1, 'Enter a message.').max(2000, 'Use at most 2000 characters.'),
+  retry: z.boolean().optional(),
+  turnKey: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9_-]{8,80}$/,
+      'Use a turn key of 8 to 80 letters, numbers, underscores, or hyphens.',
+    )
+    .optional(),
 });
 
 export const assistantSlotRequestSchema = z.object({

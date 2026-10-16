@@ -1,4 +1,5 @@
 import type { AppointmentRecord, Slot, WorkflowState } from '@careflow/shared';
+import { bookingRules } from '../scheduling/rules.js';
 
 export function describeSlots(input: {
   closed: boolean;
@@ -68,6 +69,29 @@ export function describeChoices(visits: AppointmentRecord[], timeZone: string, a
       `${visit.serviceName} on ${formatWhen(visit.startsAt, timeZone)} with ${visit.staffName}`,
   );
   return `Which visit should I ${action}?\n${lines.join('\n')}`;
+}
+
+export function describeServices(
+  services: Array<{ name: string; durationMinutes: number; active: boolean }>,
+) {
+  const active = services.filter((service) => service.active);
+  if (active.length === 0) {
+    return 'This clinic has no services available to book right now.';
+  }
+  const lines = active.map((service) => `${service.name} (${service.durationMinutes} minutes)`);
+  return `These are the visits this clinic offers:\n${lines.join('\n')}\nTell me which one you want and which day. Nothing is booked until you confirm.`;
+}
+
+export function describeSchedule() {
+  return `Open times come from this clinic's schedule after you choose a visit and a day. You can request a time from today through the next ${bookingRules.horizonDays} days, at least ${bookingRules.minimumNoticeMinutes} minutes from now. I only offer times that are actually open.`;
+}
+
+export function describePolicy() {
+  return 'A visit is saved only after you confirm an open time. You can list, move, or cancel your own upcoming visits here, and a cancellation is saved only after you confirm it. I do not have prices, preparation instructions, or other clinic policies.';
+}
+
+export function describeLimits() {
+  return 'I can book, list, move, or cancel a visit, and I can answer from this clinic service list and scheduling rules. I cannot help with that request. You can also use the booking form.';
 }
 
 export function suggestionsFor(state: WorkflowState, serviceNames: string[]) {

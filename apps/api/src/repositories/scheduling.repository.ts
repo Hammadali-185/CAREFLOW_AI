@@ -1,6 +1,11 @@
 import type { AppointmentRecord, AppointmentStatus, MembershipRole } from '@careflow/shared';
 import type { Prisma, PrismaClient } from '../generated/prisma/client.js';
-import { SlotTakenError, SlotUnavailableError } from '../errors/http-errors.js';
+import { NotFoundError } from '../errors/app-error.js';
+import {
+  AppointmentNotEligibleError,
+  SlotTakenError,
+  SlotUnavailableError,
+} from '../errors/http-errors.js';
 import { buildSlots, weekdayForDate } from '../modules/scheduling/slots.js';
 import { addCivilDays, civilDateTimeToUtc, clinicToday } from '../modules/scheduling/time.js';
 
@@ -16,6 +21,7 @@ const appointmentSelect = {
   endsAt: true,
   cancelledAt: true,
   idempotencyKey: true,
+  rescheduledFromAppointmentId: true,
 } satisfies Prisma.AppointmentSelect;
 
 type AppointmentRow = Prisma.AppointmentGetPayload<{ select: typeof appointmentSelect }>;
@@ -72,6 +78,7 @@ export type SchedulingRepository = {
     dayEnd: Date,
   ): Promise<Array<{ startsAt: Date; endsAt: Date }>>;
   findByIdempotency(patientUserId: string, key: string): Promise<StoredAppointment | null>;
+  findRescheduledFrom(fromAppointmentId: string): Promise<StoredAppointment | null>;
   book(input: BookInput): Promise<StoredAppointment>;
   cancel(id: string, actorUserId: string, now: Date): Promise<StoredAppointment>;
   reschedule(input: RescheduleInput): Promise<StoredAppointment>;
@@ -237,6 +244,15 @@ export function createPrismaSchedulingRepository(prisma: PrismaClient): Scheduli
       const [stored] = await hydrateAppointments(prisma, row ? [row] : []);
       return stored ?? null;
     },
+    async findRescheduledFrom(fromAppointmentId) {
+      const row = await prisma.appointment.findFirst({
+        where: { rescheduledFromAppointmentId: fromAppointmentId },
+        orderBy: { startsAt: 'desc' },
+        select: appointmentSelect,
+      });
+      const [stored] = await hydrateAppointments(prisma, row ? [row] : []);
+      return stored ?? null;
+    },
     book(input) {
       return prisma.$transaction(async (tx) => {
         await lockUser(tx, input.staffUserId);
@@ -276,6 +292,19 @@ export function createPrismaSchedulingRepository(prisma: PrismaClient): Scheduli
     cancel(id, actorUserId, now) {
       return prisma.$transaction(async (tx) => {
         await lockAppointment(tx, id);
+        const current = await tx.appointment.findUnique({
+          where: { id },
+          select: appointmentSelect,
+        });
+        if (!current) {
+          throw new NotFoundError('That appointment was not found.');
+        }
+        if (current.status === 'cancelled') {
+          return oneAppointment(await hydrateAppointments(tx, [current]));
+        }
+        if (current.status !== 'requested' && current.status !== 'confirmed') {
+          throw new AppointmentNotEligibleError();
+        }
         const updated = await tx.appointment.update({
           where: { id },
           data: { status: 'cancelled', cancelledAt: now },
@@ -297,6 +326,27 @@ export function createPrismaSchedulingRepository(prisma: PrismaClient): Scheduli
     reschedule(input) {
       return prisma.$transaction(async (tx) => {
         await lockAppointment(tx, input.appointmentId);
+        const current = await tx.appointment.findUnique({
+          where: { id: input.appointmentId },
+          select: appointmentSelect,
+        });
+        if (!current) {
+          throw new NotFoundError('That appointment was not found.');
+        }
+        if (current.status === 'cancelled') {
+          const existing = await tx.appointment.findFirst({
+            where: { rescheduledFromAppointmentId: input.appointmentId },
+            orderBy: { startsAt: 'desc' },
+            select: appointmentSelect,
+          });
+          if (existing) {
+            return oneAppointment(await hydrateAppointments(tx, [existing]));
+          }
+          throw new AppointmentNotEligibleError();
+        }
+        if (current.status !== 'requested' && current.status !== 'confirmed') {
+          throw new AppointmentNotEligibleError();
+        }
         await lockUser(tx, input.staffUserId);
         await assertSlotStillOpen(tx, input);
         await tx.appointment.update({

@@ -124,6 +124,7 @@ export type ApiClient = {
     sessionId: string,
     text: string,
     csrfToken: string,
+    options?: { retry?: boolean; turnKey?: string },
   ) => Promise<AssistantTurn>;
   selectAssistantSlot: (
     sessionId: string,
@@ -386,11 +387,20 @@ export function createApiClient(baseUrl: string): ApiClient {
         reportUnauthorized,
       );
     },
-    postAssistantMessage(sessionId, text, csrfToken) {
+    postAssistantMessage(sessionId, text, csrfToken, options) {
       return send(
         root,
         `/api/assistant/sessions/${sessionId}/messages`,
-        { method: 'POST', body: { text }, csrfToken, schema: assistantTurnSchema },
+        {
+          method: 'POST',
+          body: {
+            text,
+            ...(options?.retry ? { retry: true } : {}),
+            ...(options?.turnKey ? { turnKey: options.turnKey } : {}),
+          },
+          csrfToken,
+          schema: assistantTurnSchema,
+        },
         reportUnauthorized,
       );
     },

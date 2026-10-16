@@ -1,17 +1,18 @@
+import { randomUUID } from 'node:crypto';
 import type {
   AppointmentRecord,
   AssistantTurn,
   MembershipRole,
+  ModelIntent,
   WorkflowState,
 } from '@careflow/shared';
 import { EMERGENCY_REPLY, looksLikeEmergency } from '../modules/assistant/emergency.js';
 import { greetingReply, looksLikeGreeting } from '../modules/assistant/greeting.js';
-import { screenedIntent } from '../modules/assistant/screen.js';
+import { groundMessage } from '../modules/assistant/ground.js';
 import {
   MODEL_HISTORY_LIMIT,
   ModelRequestError,
   type ModelClient,
-  type ModelCompletion,
 } from '../modules/assistant/model.js';
 import { parseModelIntent } from '../modules/assistant/parse-intent.js';
 import { buildSystemPrompt } from '../modules/assistant/prompt.js';
@@ -19,7 +20,11 @@ import {
   describeBooked,
   describeCancel,
   describeChoices,
+  describeLimits,
+  describePolicy,
   describeReview,
+  describeSchedule,
+  describeServices,
   describeSlots,
   describeVisits,
   slotStillOffered,
@@ -35,6 +40,7 @@ import {
 } from '../errors/http-errors.js';
 import type {
   AssistantRepository,
+  LockedSession,
   StoredMessage,
   StoredSession,
 } from '../repositories/assistant.repository.js';
@@ -43,6 +49,9 @@ import type { Logger } from '../utils/logger.js';
 
 const MESSAGE_LIMIT = 100;
 const SLOT_LIMIT = 12;
+export const TURN_CLAIM_TTL_MS = 90_000;
+const TURN_WAIT_MS = 20_000;
+const TURN_POLL_MS = 200;
 
 type Clinic = { id: string; name: string; slug: string; timezone: string };
 
@@ -53,7 +62,12 @@ export type AssistantService = {
   ): Promise<{ sessions: AssistantTurn['session'][] }>;
   createSession(actorUserId: string, clinic: Clinic): Promise<AssistantTurn>;
   getSession(actorUserId: string, sessionId: string): Promise<AssistantTurn>;
-  postMessage(actorUserId: string, sessionId: string, text: string): Promise<AssistantTurn>;
+  postMessage(
+    actorUserId: string,
+    sessionId: string,
+    text: string,
+    options?: { retry?: boolean; turnKey?: string },
+  ): Promise<AssistantTurn>;
   selectSlot(
     actorUserId: string,
     sessionId: string,
@@ -73,8 +87,12 @@ export function createAssistantService(deps: {
   ) => Promise<{ clinic: Clinic; role: MembershipRole } | null>;
   logger: Logger;
   now?: () => Date;
+  onTurnWait?: (sessionId: string) => void;
+  beforeTurnPersist?: () => Promise<void>;
+  beforeWorkflowSave?: () => Promise<void>;
 }): AssistantService {
   const now = deps.now ?? (() => new Date());
+  const turnWaiters = new Map<string, Array<() => void>>();
 
   return {
     async listSessions(actorUserId, clinicId) {
@@ -124,244 +142,37 @@ export function createAssistantService(deps: {
       });
     },
 
-    async postMessage(actorUserId, sessionId, text) {
-      const loaded = await loadOwned(actorUserId, sessionId);
-      await deps.repository.appendMessage({
-        businessId: loaded.session.businessId,
-        sessionId: loaded.session.id,
-        senderKind: 'user',
-        senderUserId: actorUserId,
-        body: text,
-      });
-
-      if (
-        looksLikeGreeting(text) &&
-        loaded.workflow.phase === 'collecting' &&
-        loaded.workflow.selectedSlot === null
-      ) {
-        return finish(loaded, {
-          workflow: {
-            ...loaded.workflow,
-            phase: 'collecting',
-            intent: 'clarify',
-            missingFields: ['service', 'date'],
-            confirmationState: 'not_required',
-          },
-          reply: greetingReply(loaded.clinic.name),
-          outcome: 'reply',
-          interaction: {
-            purpose: 'extract_intent',
-            model: 'careflow-screen',
-            promptTokens: 0,
-            completionTokens: 0,
-            latencyMs: 0,
-            status: 'succeeded',
-            errorCode: null,
-          },
-        });
+    async postMessage(actorUserId, sessionId, text, options) {
+      const initial = await loadOwned(actorUserId, sessionId);
+      const decision = await claimTurn(actorUserId, initial, text, options);
+      if (decision.kind === 'replay') {
+        return replayTurn(actorUserId, decision.loaded);
       }
-
-      if (looksLikeEmergency(text)) {
-        return finish(loaded, {
-          workflow: {
-            ...loaded.workflow,
-            phase: 'collecting',
-            intent: 'unsupported',
-            offeredSlots: [],
-            selectedSlot: null,
-            confirmationState: 'not_required',
-          },
-          reply: EMERGENCY_REPLY,
-          outcome: 'emergency',
-          interaction: {
-            purpose: 'emergency_screen',
-            model: 'careflow-screen',
-            promptTokens: 0,
-            completionTokens: 0,
-            latencyMs: 0,
-            status: 'refused',
-            errorCode: null,
-          },
-        });
-      }
-
-      const catalog = await catalogFor(loaded.clinic);
-      const screened =
-        loaded.workflow.phase === 'collecting' && loaded.workflow.selectedSlot === null
-          ? screenedIntent(
-              text,
-              catalog.services.map((service) => service.name),
-            )
-          : null;
-      let completion: ModelCompletion;
-      if (screened) {
-        completion = {
-          content: '',
-          model: 'careflow-screen',
-          promptTokens: 0,
-          completionTokens: 0,
-          latencyMs: 0,
-        };
-      } else {
-        try {
-          const history = await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT);
-          completion = await deps.model.complete({
-            system: buildSystemPrompt({
-              serviceNames: catalog.services.map((service) => service.name),
-              staffNames: catalog.staff.map((person) => person.displayName),
-              today: clinicDate(now(), loaded.clinic.timezone),
-              timeZone: loaded.clinic.timezone,
-              state: loaded.workflow,
-            }),
-            messages: history
-              .filter(
-                (message) => message.senderKind === 'user' || message.senderKind === 'assistant',
-              )
-              .slice(-MODEL_HISTORY_LIMIT)
-              .map((message) => ({
-                role: message.senderKind === 'user' ? ('user' as const) : ('assistant' as const),
-                content: message.body,
-              })),
-          });
-        } catch (error) {
-          const failure = error instanceof ModelRequestError ? error : unavailable();
-          deps.logger.warn('assistant provider error', {
-            purpose: 'extract_intent',
-            status: 'failed',
-            errorCode: failure.code,
-            latencyMs: 0,
-          });
-          return finish(loaded, {
-            workflow: loaded.workflow,
-            reply: failure.message,
-            outcome: 'unavailable',
-            interaction: {
-              purpose: 'extract_intent',
-              model: 'unavailable',
-              promptTokens: 0,
-              completionTokens: 0,
-              latencyMs: 0,
-              status: 'failed',
-              errorCode: failure.code,
-            },
-          });
+      if (decision.kind === 'wait') {
+        const followed = await followTurn(actorUserId, decision.loaded);
+        if (followed) {
+          return followed;
         }
-
-        deps.logger.info('assistant model', {
+        return processingTurn(decision.loaded);
+      }
+      if (decision.kind === 'busy') {
+        return processingTurn(decision.loaded);
+      }
+      const loaded = decision.loaded;
+      try {
+        return await answerTurn(actorUserId, loaded, text);
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+        notifyTurn(loaded.session.id);
+        deps.logger.warn('assistant turn was not saved', {
           purpose: 'extract_intent',
-          model: completion.model,
-          latencyMs: completion.latencyMs,
-          promptTokens: completion.promptTokens,
-          completionTokens: completion.completionTokens,
-          status: 'succeeded',
+          status: 'failed',
+          errorCode: 'TURN_PERSIST',
         });
+        return processingTurn(await loadOwned(actorUserId, sessionId));
       }
-
-      const parsed = screened
-        ? { ok: true as const, intent: screened }
-        : parseModelIntent(completion.content);
-      if (!parsed.ok) {
-        return finish(loaded, {
-          workflow: loaded.workflow,
-          reply:
-            'I could not read a scheduling request from that reply. Your message is saved. Try again, or use the booking form.',
-          outcome: 'invalid_output',
-          interaction: metric(completion, 'failed', 'INVALID_OUTPUT'),
-        });
-      }
-      if (parsed.intent.emergency) {
-        return finish(loaded, {
-          workflow: {
-            ...loaded.workflow,
-            phase: 'collecting',
-            intent: 'unsupported',
-            offeredSlots: [],
-            selectedSlot: null,
-            confirmationState: 'not_required',
-          },
-          reply: EMERGENCY_REPLY,
-          outcome: 'emergency',
-          interaction: metric(completion, 'refused', null),
-        });
-      }
-
-      const applied = applyExtraction(loaded.workflow, parsed.intent);
-      const today = clinicDate(now(), loaded.clinic.timezone);
-      const details = resolveBookingDetails({
-        state: applied.state,
-        services: catalog.services,
-        staff: catalog.staff,
-        today,
-      });
-      let workflow: WorkflowState = {
-        ...applied.state,
-        serviceId: details.serviceId,
-        date: details.date,
-        staffUserId: details.staffUserId,
-        missingFields: details.missing,
-      };
-
-      const waiting =
-        (loaded.workflow.phase === 'awaiting_confirmation' ||
-          loaded.workflow.phase === 'awaiting_reschedule_confirmation' ||
-          loaded.workflow.phase === 'awaiting_cancel_confirmation') &&
-        !applied.preferenceChanged &&
-        workflow.intent === loaded.workflow.intent;
-      if (waiting) {
-        return finish(loaded, {
-          workflow: loaded.workflow,
-          reply: 'Nothing is saved yet. Use the confirmation card, or tell me what to change.',
-          outcome: 'review',
-          interaction: metric(completion, 'succeeded', null),
-        });
-      }
-
-      if (details.question) {
-        workflow = { ...workflow, phase: 'collecting', offeredSlots: [], selectedSlot: null };
-        return finish(loaded, {
-          workflow,
-          reply: details.question,
-          outcome: 'reply',
-          interaction: metric(completion, 'succeeded', null),
-        });
-      }
-
-      if (workflow.intent === 'list') {
-        const visits = await upcoming(actorUserId, loaded.clinic.id);
-        return finish(loaded, {
-          workflow: { ...workflow, phase: 'collecting', confirmationState: 'not_required' },
-          reply: describeVisits(visits, loaded.clinic.timezone),
-          outcome: 'listed',
-          interaction: metric(completion, 'succeeded', null),
-        });
-      }
-
-      if (workflow.intent === 'unsupported' || workflow.intent === 'clarify' || !workflow.intent) {
-        return finish(loaded, {
-          workflow: { ...workflow, phase: 'collecting' },
-          reply: 'I can help book, list, cancel, or move a visit. I cannot help with that request.',
-          outcome: 'reply',
-          interaction: metric(completion, 'succeeded', null),
-        });
-      }
-
-      if (workflow.intent === 'cancel' || workflow.intent === 'reschedule') {
-        const planned = await planChange(actorUserId, loaded.clinic, workflow);
-        return finish(loaded, {
-          workflow: planned.workflow,
-          reply: planned.reply,
-          outcome: planned.outcome,
-          interaction: metric(completion, 'succeeded', null),
-        });
-      }
-
-      const searched = await search(loaded.clinic, workflow);
-      return finish(loaded, {
-        workflow: searched.workflow,
-        reply: searched.reply,
-        outcome: searched.outcome,
-        interaction: metric(completion, 'succeeded', null),
-      });
     },
 
     async selectSlot(actorUserId, sessionId, input) {
@@ -397,17 +208,40 @@ export function createAssistantService(deps: {
         timeZone: loaded.clinic.timezone,
         moving,
       });
-      await deps.repository.saveWorkflow(loaded.session.id, workflow);
-      await deps.repository.appendMessage({
-        businessId: loaded.session.businessId,
-        sessionId: loaded.session.id,
-        senderKind: 'assistant',
-        senderUserId: null,
-        body: reply,
-      });
+      const stored = await storeWorkflow(loaded.session.id, workflow, undefined, true);
+      if (!stored) {
+        const fresh = await loadOwned(actorUserId, sessionId);
+        const stillChoosing =
+          fresh.workflow.phase === loaded.workflow.phase &&
+          !fresh.workflow.turnSettled &&
+          slotStillOffered(fresh.workflow.offeredSlots, input.staffUserId, input.startsAt);
+        if (!stillChoosing) {
+          return replayTurn(actorUserId, fresh);
+        }
+        const retry: WorkflowState = {
+          ...fresh.workflow,
+          selectedSlot: slot,
+          phase: moving ? 'awaiting_reschedule_confirmation' : 'awaiting_confirmation',
+          confirmationState: 'required',
+        };
+        const retried = await storeWorkflow(loaded.session.id, retry, undefined, false);
+        if (!retried) {
+          return replayTurn(actorUserId, await loadOwned(actorUserId, sessionId));
+        }
+        await appendAssistantMessage(fresh, reply);
+        return present({
+          ...fresh,
+          workflow: retried,
+          messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
+          outcome: 'review',
+          appointment: null,
+          suggestions: [],
+        });
+      }
+      await appendAssistantMessage(loaded, reply);
       return present({
         ...loaded,
-        workflow,
+        workflow: stored,
         messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
         outcome: 'review',
         appointment: null,
@@ -416,13 +250,26 @@ export function createAssistantService(deps: {
     },
 
     async confirm(actorUserId, sessionId) {
+      await loadOwned(actorUserId, sessionId);
+      if (deps.beforeWorkflowSave) {
+        await deps.beforeWorkflowSave();
+      }
       const loaded = await loadOwned(actorUserId, sessionId);
+      if (claimIsActive(loaded.workflow, now())) {
+        return processingTurn(loaded);
+      }
       if (loaded.workflow.phase === 'completed' && loaded.workflow.appointmentId) {
         const appointment = await deps.scheduling.getAppointment(
           actorUserId,
           loaded.workflow.appointmentId,
         );
-        return present({ ...loaded, outcome: 'booked', appointment, suggestions: [] });
+        const outcome =
+          appointment.status === 'cancelled'
+            ? 'cancelled'
+            : loaded.workflow.intent === 'reschedule'
+              ? 'rescheduled'
+              : 'booked';
+        return present({ ...loaded, outcome, appointment, suggestions: [] });
       }
 
       try {
@@ -470,6 +317,10 @@ export function createAssistantService(deps: {
           return commit(loaded, appointment, 'rescheduled', true);
         }
       } catch (error) {
+        const alreadyBooked = await matchingVisit(actorUserId, loaded);
+        if (alreadyBooked && error instanceof AppError && error.code === 'SLOT_TAKEN') {
+          return commit(loaded, alreadyBooked, 'booked', false);
+        }
         const recovered = await recover(loaded, error);
         if (recovered) {
           return recovered;
@@ -480,6 +331,305 @@ export function createAssistantService(deps: {
       throw new ConfirmationRequiredError();
     },
   };
+
+  async function respondFromIntent(
+    actorUserId: string,
+    loaded: Owned,
+    catalog: Catalog,
+    today: string,
+    extracted: ModelIntent,
+    interaction: Interaction,
+  ) {
+    const applied = applyExtraction(loaded.workflow, extracted);
+    const details = resolveBookingDetails({
+      state: applied.state,
+      services: catalog.services,
+      staff: catalog.staff,
+      today,
+    });
+    let workflow: WorkflowState = {
+      ...applied.state,
+      serviceId: details.serviceId,
+      date: details.date,
+      staffUserId: details.staffUserId,
+      missingFields: details.missing,
+    };
+
+    const waiting =
+      (loaded.workflow.phase === 'awaiting_confirmation' ||
+        loaded.workflow.phase === 'awaiting_reschedule_confirmation' ||
+        loaded.workflow.phase === 'awaiting_cancel_confirmation') &&
+      !applied.preferenceChanged &&
+      workflow.intent === loaded.workflow.intent;
+    if (waiting) {
+      return finish(loaded, {
+        workflow: loaded.workflow,
+        reply: 'Nothing is saved yet. Use the confirmation card, or tell me what to change.',
+        outcome: 'review',
+        interaction,
+      });
+    }
+
+    if (details.question) {
+      workflow = { ...workflow, phase: 'collecting', offeredSlots: [], selectedSlot: null };
+      return finish(loaded, {
+        workflow,
+        reply: details.question,
+        outcome: 'reply',
+        interaction,
+      });
+    }
+
+    if (workflow.intent === 'list') {
+      const visits = await upcoming(actorUserId, loaded.clinic.id);
+      return finish(loaded, {
+        workflow: { ...workflow, phase: 'collecting', confirmationState: 'not_required' },
+        reply: describeVisits(visits, loaded.clinic.timezone),
+        outcome: 'listed',
+        interaction,
+      });
+    }
+
+    if (workflow.intent === 'unsupported' || workflow.intent === 'clarify' || !workflow.intent) {
+      return finish(loaded, {
+        workflow: { ...workflow, phase: 'collecting' },
+        reply: describeLimits(),
+        outcome: 'reply',
+        interaction,
+      });
+    }
+
+    if (workflow.intent === 'cancel' || workflow.intent === 'reschedule') {
+      const planned = await planChange(actorUserId, loaded.clinic, workflow);
+      return finish(loaded, {
+        workflow: planned.workflow,
+        reply: planned.reply,
+        outcome: planned.outcome,
+        interaction,
+      });
+    }
+
+    const searched = await search(loaded.clinic, workflow);
+    return finish(loaded, {
+      workflow: searched.workflow,
+      reply: searched.reply,
+      outcome: searched.outcome,
+      interaction,
+    });
+  }
+
+  async function claimTurn(
+    actorUserId: string,
+    base: Owned,
+    text: string,
+    options?: { retry?: boolean; turnKey?: string },
+  ) {
+    return deps.repository.withLockedSession(base.session.id, MESSAGE_LIMIT, async (locked) => {
+      const loaded = ownedFrom(base, locked);
+      const turnKey = options?.turnKey;
+      if (claimIsActive(loaded.workflow, now()) && loaded.workflow.turnKey !== turnKey) {
+        return { kind: 'busy' as const, loaded };
+      }
+      if (!turnKey) {
+        const retrying = await failedTextRetry(loaded, text, options?.retry === true, locked);
+        if (!retrying) {
+          await locked.appendMessage({
+            businessId: loaded.session.businessId,
+            senderKind: 'user',
+            senderUserId: actorUserId,
+            body: text,
+          });
+        }
+        return { kind: 'process' as const, loaded: ownedFrom(base, locked) };
+      }
+
+      const same = loaded.workflow.turnKey === turnKey;
+      if (same && claimIsActive(loaded.workflow, now())) {
+        return { kind: 'wait' as const, loaded };
+      }
+      const retryable =
+        loaded.workflow.turnOutcome === 'unavailable' ||
+        loaded.workflow.turnOutcome === 'invalid_output';
+      if (same && loaded.workflow.turnSettled && !(options?.retry === true && retryable)) {
+        return { kind: 'replay' as const, loaded };
+      }
+      if (!same) {
+        await locked.appendMessage({
+          businessId: loaded.session.businessId,
+          senderKind: 'user',
+          senderUserId: actorUserId,
+          body: text,
+        });
+      }
+      await locked.saveWorkflow({
+        ...locked.workflow,
+        turnKey,
+        turnClaim: randomUUID(),
+        turnClaimedAt: now().toISOString(),
+        turnSettled: same ? locked.workflow.turnSettled : false,
+        turnOutcome: same ? locked.workflow.turnOutcome : null,
+      });
+      return { kind: 'process' as const, loaded: ownedFrom(base, locked) };
+    });
+  }
+
+  function ownedFrom(base: Owned, locked: LockedSession): Owned {
+    return {
+      session: locked.session,
+      clinic: base.clinic,
+      messages: [...locked.messages],
+      workflow: locked.workflow,
+    };
+  }
+
+  async function followTurn(actorUserId: string, loaded: Owned) {
+    const sessionId = loaded.session.id;
+    const turnKey = loaded.workflow.turnKey;
+    const deadline = Date.now() + TURN_WAIT_MS;
+    let signaled = false;
+    while (Date.now() < deadline) {
+      const subscription = subscribeTurn(sessionId);
+      const current = await loadOwned(actorUserId, sessionId);
+      const active = claimIsActive(current.workflow, now());
+      if (current.workflow.turnKey === turnKey && current.workflow.turnSettled && !active) {
+        subscription.cancel();
+        return replayTurn(actorUserId, current);
+      }
+      if (!active) {
+        subscription.cancel();
+        return null;
+      }
+      if (!signaled) {
+        signaled = true;
+        deps.onTurnWait?.(sessionId);
+      }
+      await Promise.race([
+        subscription.promise,
+        new Promise<void>((resolve) => {
+          const timeout = setTimeout(resolve, TURN_POLL_MS);
+          void subscription.promise.then(() => clearTimeout(timeout));
+        }),
+      ]);
+      subscription.cancel();
+    }
+    return null;
+  }
+
+  function processingTurn(loaded: Owned): AssistantTurn {
+    return present({
+      ...loaded,
+      messages: [
+        ...loaded.messages,
+        {
+          id: randomUUID(),
+          senderKind: 'assistant',
+          body: 'That message is still being handled. Nothing has been booked, cancelled, or rescheduled.',
+          createdAt: now(),
+        },
+      ],
+      outcome: 'unavailable',
+      appointment: null,
+      suggestions: [],
+    });
+  }
+
+  function notifyTurn(sessionId: string) {
+    const waiting = turnWaiters.get(sessionId) ?? [];
+    turnWaiters.delete(sessionId);
+    for (const resolve of waiting) {
+      resolve();
+    }
+  }
+
+  function subscribeTurn(sessionId: string) {
+    let resolveWait = () => {};
+    const promise = new Promise<void>((resolve) => {
+      resolveWait = resolve;
+    });
+    const waiting = turnWaiters.get(sessionId) ?? [];
+    waiting.push(resolveWait);
+    turnWaiters.set(sessionId, waiting);
+    return {
+      promise,
+      cancel() {
+        const remaining = (turnWaiters.get(sessionId) ?? []).filter(
+          (resolve) => resolve !== resolveWait,
+        );
+        if (remaining.length === 0) {
+          turnWaiters.delete(sessionId);
+        } else {
+          turnWaiters.set(sessionId, remaining);
+        }
+      },
+    };
+  }
+
+  function claimIsActive(workflow: WorkflowState, at: Date) {
+    if (!workflow.turnClaim || !workflow.turnClaimedAt) {
+      return false;
+    }
+    const started = Date.parse(workflow.turnClaimedAt);
+    if (Number.isNaN(started)) {
+      return false;
+    }
+    return at.getTime() - started < TURN_CLAIM_TTL_MS;
+  }
+
+  async function failedTextRetry(
+    loaded: Owned,
+    text: string,
+    retry: boolean,
+    locked: LockedSession,
+  ) {
+    if (!retry) {
+      return false;
+    }
+    const last = loaded.messages.at(-1);
+    const previous = loaded.messages.at(-2);
+    if (
+      last?.senderKind !== 'assistant' ||
+      previous?.senderKind !== 'user' ||
+      previous.body !== text
+    ) {
+      return false;
+    }
+    const interaction = await locked.latestInteraction();
+    return interaction?.status === 'failed';
+  }
+
+  async function replayTurn(actorUserId: string, loaded: Owned) {
+    const appointment = await linkedAppointment(actorUserId, loaded.workflow);
+    const names = (await catalogFor(loaded.clinic)).services.map((service) => service.name);
+    return present({
+      ...loaded,
+      outcome: loaded.workflow.turnOutcome ?? 'loaded',
+      appointment:
+        loaded.workflow.turnOutcome === 'booked' ||
+        loaded.workflow.turnOutcome === 'cancelled' ||
+        loaded.workflow.turnOutcome === 'rescheduled'
+          ? appointment
+          : null,
+      suggestions: suggestionsFor(loaded.workflow, names),
+    });
+  }
+
+  async function matchingVisit(actorUserId: string, loaded: Owned) {
+    const slot = loaded.workflow.selectedSlot;
+    if (!slot || !loaded.workflow.serviceId) {
+      return null;
+    }
+    const mine = await deps.scheduling.listMine(actorUserId);
+    return (
+      mine.find(
+        (visit) =>
+          visit.clinicId === loaded.clinic.id &&
+          visit.serviceId === loaded.workflow.serviceId &&
+          visit.staffUserId === slot.staffUserId &&
+          visit.startsAt === slot.startsAt &&
+          (visit.status === 'confirmed' || visit.status === 'requested'),
+      ) ?? null
+    );
+  }
 
   async function commit(
     loaded: Owned,
@@ -496,18 +646,47 @@ export function createAssistantService(deps: {
       offeredSlots: [],
     };
     const reply = describeBooked(appointment, loaded.clinic.timezone, moved);
-    await deps.repository.saveWorkflow(loaded.session.id, workflow, appointment.id);
-    await deps.repository.appendMessage({
-      businessId: loaded.session.businessId,
-      sessionId: loaded.session.id,
-      senderKind: 'assistant',
-      senderUserId: null,
-      body: reply,
-    });
+    const stored = await storeWorkflow(loaded.session.id, workflow, appointment.id, true);
+    if (!stored) {
+      const fresh = await loadOwned(loaded.session.participantUserId, loaded.session.id);
+      if (fresh.workflow.phase === 'completed' && fresh.workflow.appointmentId === appointment.id) {
+        return present({
+          ...fresh,
+          session: { ...fresh.session, appointmentId: appointment.id },
+          outcome,
+          appointment,
+          suggestions: [],
+        });
+      }
+      const merged = await deps.repository.completeConfirmedWorkflow(
+        loaded.session.id,
+        appointment.id,
+      );
+      if (merged === 'other') {
+        return replayTurn(
+          loaded.session.participantUserId,
+          await loadOwned(loaded.session.participantUserId, loaded.session.id),
+        );
+      }
+      const current = await loadOwned(loaded.session.participantUserId, loaded.session.id);
+      if (merged === 'stored') {
+        await appendAssistantMessage(current, reply);
+      }
+      return present({
+        ...current,
+        session: { ...current.session, appointmentId: appointment.id },
+        workflow: current.workflow,
+        messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
+        outcome,
+        appointment,
+        suggestions: [],
+      });
+    }
+    await appendAssistantMessage(loaded, reply);
     return present({
       ...loaded,
       session: { ...loaded.session, appointmentId: appointment.id },
-      workflow,
+      workflow: stored,
       messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
       outcome,
       appointment,
@@ -536,22 +715,222 @@ export function createAssistantService(deps: {
       workflow.serviceId && workflow.date ? await search(loaded.clinic, workflow) : null;
     const next = searched?.workflow ?? workflow;
     const reply = searched ? `${error.message}\n${searched.reply}` : error.message;
-    await deps.repository.saveWorkflow(loaded.session.id, next);
-    await deps.repository.appendMessage({
-      businessId: loaded.session.businessId,
-      sessionId: loaded.session.id,
-      senderKind: 'assistant',
-      senderUserId: null,
-      body: reply,
-    });
+    const stored = await storeWorkflow(loaded.session.id, next, undefined, false);
+    await appendAssistantMessage(loaded, reply);
+    const current =
+      stored ?? (await loadOwned(loaded.session.participantUserId, loaded.session.id)).workflow;
     return present({
       ...loaded,
-      workflow: next,
+      workflow: current,
       messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
       outcome: 'slots',
       appointment: null,
       suggestions: [],
     });
+  }
+
+  async function storeWorkflow(
+    sessionId: string,
+    state: WorkflowState,
+    appointmentId: string | null | undefined,
+    pause: boolean,
+  ) {
+    if (pause && deps.beforeWorkflowSave) {
+      await deps.beforeWorkflowSave();
+    }
+    const result = await deps.repository.saveWorkflow(sessionId, state, appointmentId);
+    if (result === 'stale') {
+      return null;
+    }
+    return { ...state, revision: state.revision + 1 };
+  }
+
+  async function appendAssistantMessage(loaded: Owned, body: string) {
+    await deps.repository.appendMessage({
+      businessId: loaded.session.businessId,
+      sessionId: loaded.session.id,
+      senderKind: 'assistant',
+      senderUserId: null,
+      body,
+    });
+  }
+
+  async function answerTurn(actorUserId: string, loaded: Owned, text: string) {
+    if (
+      looksLikeGreeting(text) &&
+      loaded.workflow.phase === 'collecting' &&
+      loaded.workflow.selectedSlot === null
+    ) {
+      return finish(loaded, {
+        workflow: {
+          ...loaded.workflow,
+          phase: 'collecting',
+          intent: 'clarify',
+          missingFields: ['service', 'date'],
+          confirmationState: 'not_required',
+        },
+        reply: greetingReply(loaded.clinic.name),
+        outcome: 'reply',
+        interaction: {
+          purpose: 'extract_intent',
+          model: 'careflow-screen',
+          promptTokens: 0,
+          completionTokens: 0,
+          latencyMs: 0,
+          status: 'succeeded',
+          errorCode: null,
+        },
+      });
+    }
+
+    if (looksLikeEmergency(text)) {
+      return finish(loaded, {
+        workflow: {
+          ...loaded.workflow,
+          phase: 'collecting',
+          intent: 'unsupported',
+          offeredSlots: [],
+          selectedSlot: null,
+          confirmationState: 'not_required',
+        },
+        reply: EMERGENCY_REPLY,
+        outcome: 'emergency',
+        interaction: {
+          purpose: 'emergency_screen',
+          model: 'careflow-screen',
+          promptTokens: 0,
+          completionTokens: 0,
+          latencyMs: 0,
+          status: 'refused',
+          errorCode: null,
+        },
+      });
+    }
+
+    const catalog = await catalogFor(loaded.clinic);
+    const today = clinicDate(now(), loaded.clinic.timezone);
+    const grounded = groundMessage({
+      text,
+      workflow: loaded.workflow,
+      services: catalog.services,
+      staff: catalog.staff,
+      today,
+    });
+    if (grounded) {
+      return respondFromIntent(actorUserId, loaded, catalog, today, grounded, {
+        purpose: 'grounded_detail',
+        model: 'careflow-catalog',
+        promptTokens: 0,
+        completionTokens: 0,
+        latencyMs: 0,
+        status: 'succeeded',
+        errorCode: null,
+      });
+    }
+
+    let completion: Awaited<ReturnType<ModelClient['complete']>>;
+    try {
+      const history = await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT);
+      completion = await deps.model.complete({
+        system: buildSystemPrompt({
+          serviceNames: catalog.services.map((service) => service.name),
+          staffNames: catalog.staff.map((person) => person.displayName),
+          today,
+          timeZone: loaded.clinic.timezone,
+          state: loaded.workflow,
+        }),
+        messages: history
+          .filter((message) => message.senderKind === 'user' || message.senderKind === 'assistant')
+          .slice(-MODEL_HISTORY_LIMIT)
+          .map((message) => ({
+            role: message.senderKind === 'user' ? ('user' as const) : ('assistant' as const),
+            content: message.body,
+          })),
+      });
+    } catch (error) {
+      const failure = error instanceof ModelRequestError ? error : unavailable();
+      deps.logger.warn('assistant provider error', {
+        purpose: 'extract_intent',
+        status: 'failed',
+        errorCode: failure.code,
+        providerStatus: failure.providerStatus,
+        latencyMs: 0,
+      });
+      return finish(loaded, {
+        workflow: loaded.workflow,
+        reply: failure.message,
+        outcome: 'unavailable',
+        interaction: {
+          purpose: 'extract_intent',
+          model: 'unavailable',
+          promptTokens: 0,
+          completionTokens: 0,
+          latencyMs: 0,
+          status: 'failed',
+          errorCode: failure.code,
+        },
+      });
+    }
+
+    deps.logger.info('assistant model', {
+      purpose: 'extract_intent',
+      model: completion.model,
+      latencyMs: completion.latencyMs,
+      promptTokens: completion.promptTokens,
+      completionTokens: completion.completionTokens,
+      status: 'succeeded',
+    });
+
+    const parsed = parseModelIntent(completion.content);
+    if (!parsed.ok) {
+      return finish(loaded, {
+        workflow: loaded.workflow,
+        reply:
+          'I could not read a scheduling request from that reply. Your message is saved. Try again, or use the booking form.',
+        outcome: 'invalid_output',
+        interaction: metric(completion, 'failed', 'INVALID_OUTPUT'),
+      });
+    }
+    if (parsed.intent.emergency) {
+      return finish(loaded, {
+        workflow: {
+          ...loaded.workflow,
+          phase: 'collecting',
+          intent: 'unsupported',
+          offeredSlots: [],
+          selectedSlot: null,
+          confirmationState: 'not_required',
+        },
+        reply: EMERGENCY_REPLY,
+        outcome: 'emergency',
+        interaction: metric(completion, 'refused', null),
+      });
+    }
+    if (isClinicQuestion(parsed.intent)) {
+      return finish(loaded, {
+        workflow: loaded.workflow,
+        reply: clinicReply(parsed.intent.topic, catalog.services),
+        outcome: 'reply',
+        interaction: metric(completion, 'succeeded', null),
+      });
+    }
+    if (isBareUnsupported(parsed.intent)) {
+      return finish(loaded, {
+        workflow: loaded.workflow,
+        reply: describeLimits(),
+        outcome: 'reply',
+        interaction: metric(completion, 'succeeded', null),
+      });
+    }
+
+    return respondFromIntent(
+      actorUserId,
+      loaded,
+      catalog,
+      today,
+      parsed.intent,
+      metric(completion, 'succeeded', null),
+    );
   }
 
   async function finish(
@@ -563,7 +942,52 @@ export function createAssistantService(deps: {
       interaction: Interaction;
     },
   ) {
-    await deps.repository.saveWorkflow(loaded.session.id, input.workflow);
+    const claimId = input.workflow.turnClaim;
+    if (input.workflow.turnKey !== null && claimId) {
+      if (deps.beforeTurnPersist) {
+        await deps.beforeTurnPersist();
+      }
+      const workflow: WorkflowState = {
+        ...input.workflow,
+        turnClaim: null,
+        turnClaimedAt: null,
+        turnSettled: true,
+        turnOutcome: input.outcome,
+      };
+      const result = await deps.repository.commitClaimedTurn({
+        sessionId: loaded.session.id,
+        claimId,
+        workflow,
+        outcome: input.outcome,
+        businessId: loaded.session.businessId,
+        actorUserId: loaded.session.participantUserId,
+        reply: input.reply,
+        interaction: input.interaction,
+      });
+      notifyTurn(loaded.session.id);
+      if (result === 'lost') {
+        return replayTurn(
+          loaded.session.participantUserId,
+          await loadOwned(loaded.session.participantUserId, loaded.session.id),
+        );
+      }
+      const current = await loadOwned(loaded.session.participantUserId, loaded.session.id);
+      const names = (await catalogFor(loaded.clinic)).services.map((service) => service.name);
+      return present({
+        ...current,
+        messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
+        outcome: input.outcome,
+        appointment: await linkedAppointment(loaded.session.participantUserId, current.workflow),
+        suggestions: suggestionsFor(current.workflow, names),
+      });
+    }
+
+    const workflow: WorkflowState = {
+      ...input.workflow,
+      turnSettled: false,
+      turnOutcome: input.workflow.turnOutcome,
+    };
+    const stored = await storeWorkflow(loaded.session.id, workflow, undefined, false);
     await deps.repository.appendMessage({
       businessId: loaded.session.businessId,
       sessionId: loaded.session.id,
@@ -578,13 +1002,15 @@ export function createAssistantService(deps: {
       ...input.interaction,
     });
     const names = (await catalogFor(loaded.clinic)).services.map((service) => service.name);
+    const current =
+      stored ?? (await loadOwned(loaded.session.participantUserId, loaded.session.id)).workflow;
     return present({
       ...loaded,
-      workflow: input.workflow,
+      workflow: current,
       messages: await deps.repository.listMessages(loaded.session.id, MESSAGE_LIMIT),
       outcome: input.outcome,
       appointment: null,
-      suggestions: suggestionsFor(input.workflow, names),
+      suggestions: suggestionsFor(current, names),
     });
   }
 
@@ -782,6 +1208,11 @@ export function createAssistantService(deps: {
   }
 }
 
+type Catalog = {
+  services: Array<{ id: string; name: string; durationMinutes: number; active: boolean }>;
+  staff: Array<{ userId: string; displayName: string }>;
+};
+
 type Planned = {
   workflow: WorkflowState;
   reply: string;
@@ -858,7 +1289,39 @@ function unavailable() {
   return new ModelRequestError(
     'UNAVAILABLE',
     'The scheduling assistant is unavailable. You can book from the form.',
+    null,
   );
+}
+
+function hasSchedulingDetail(intent: ModelIntent) {
+  return Boolean(
+    intent.serviceQuery || intent.datePreference || intent.timePreference || intent.staffQuery,
+  );
+}
+
+function isClinicQuestion(intent: ModelIntent) {
+  return (
+    intent.topic !== null &&
+    !hasSchedulingDetail(intent) &&
+    (intent.intent === 'clarify' || intent.intent === 'unsupported')
+  );
+}
+
+function isBareUnsupported(intent: ModelIntent) {
+  return intent.intent === 'unsupported' && intent.topic === null && !hasSchedulingDetail(intent);
+}
+
+function clinicReply(topic: ModelIntent['topic'], services: Catalog['services']) {
+  if (topic === 'services') {
+    return describeServices(services);
+  }
+  if (topic === 'schedule') {
+    return describeSchedule();
+  }
+  if (topic === 'policy') {
+    return describePolicy();
+  }
+  return describeLimits();
 }
 
 function assistantKey(sessionId: string, startsAt: string) {

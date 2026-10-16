@@ -34,7 +34,10 @@ export function createAssistantController(assistant: AssistantService) {
     async postMessage(req: Request, res: Response) {
       const params = parseRequest(assistantSessionParamsSchema, req.params);
       const input = parseRequest(assistantMessageRequestSchema, req.body);
-      const body = await assistant.postMessage(requireUser(req), params.sessionId, input.text);
+      const body = await assistant.postMessage(requireUser(req), params.sessionId, input.text, {
+        retry: input.retry === true,
+        turnKey: input.turnKey,
+      });
       res.status(200).json(body);
     },
     async selectSlot(req: Request, res: Response) {

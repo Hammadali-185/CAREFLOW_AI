@@ -12,7 +12,7 @@ const envSchema = z.object({
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     z.string().min(1).optional(),
   ),
-  MISTRAL_MODEL: z.string().min(1).default('ministral-3b-latest'),
+  MISTRAL_MODEL: z.string().min(1).default('mistral-small-latest'),
   MISTRAL_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(20_000),
 });
 

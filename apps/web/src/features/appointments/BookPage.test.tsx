@@ -90,7 +90,7 @@ describe('booking confirmation', () => {
     expect(await screen.findByRole('heading', { name: 'Book a visit' })).toBeVisible();
     await user.selectOptions(await screen.findByLabelText('Service'), serviceId);
     fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2026-10-20' } });
-    await user.click(await screen.findByRole('button', { name: /jordan ellis/i }));
+    await user.click(await screen.findByRole('button', { name: /hamza qureshi/i }));
     await user.click(screen.getByRole('button', { name: 'Review booking' }));
     await user.click(screen.getByRole('button', { name: 'Confirm booking' }));
 

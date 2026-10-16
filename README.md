@@ -119,7 +119,7 @@ Optional assistant settings in `apps/api/.env`:
 | Variable             | Role                                                                                          |
 | -------------------- | --------------------------------------------------------------------------------------------- |
 | `MISTRAL_API_KEY`    | Provider key. Leave it unset to run the API without the model. The browser never receives it. |
-| `MISTRAL_MODEL`      | Model name. The example default is `ministral-3b-latest`.                                     |
+| `MISTRAL_MODEL`      | Model name. The example default is `mistral-small-latest`.                                    |
 | `MISTRAL_TIMEOUT_MS` | Request timeout in milliseconds. The example default is `20000`. Maximum accepted is `60000`. |
 
 ## High-level architecture

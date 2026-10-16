@@ -1,6 +1,7 @@
 import type { WorkflowState } from '@careflow/shared';
 import type { Prisma, PrismaClient } from '../generated/prisma/client.js';
-import { emptyWorkflow } from '../modules/assistant/workflow.js';
+import { NotFoundError } from '../errors/app-error.js';
+import { emptyWorkflow, readWorkflow } from '../modules/assistant/workflow.js';
 
 export type StoredSession = {
   id: string;
@@ -42,7 +43,7 @@ export type AssistantRepository = {
     sessionId: string,
     state: WorkflowState,
     appointmentId?: string | null,
-  ): Promise<void>;
+  ): Promise<'stored' | 'stale'>;
   recordInteraction(input: {
     businessId: string;
     actorUserId: string;
@@ -55,6 +56,55 @@ export type AssistantRepository = {
     status: 'succeeded' | 'failed' | 'refused';
     errorCode: string | null;
   }): Promise<void>;
+  latestInteraction(
+    sessionId: string,
+  ): Promise<{ status: 'succeeded' | 'failed' | 'refused'; errorCode: string | null } | null>;
+  withLockedSession<T>(
+    sessionId: string,
+    messageLimit: number,
+    run: (locked: LockedSession) => Promise<T>,
+  ): Promise<T>;
+  commitClaimedTurn(input: ClaimedTurnCommit): Promise<'stored' | 'lost'>;
+  completeConfirmedWorkflow(
+    sessionId: string,
+    appointmentId: string,
+  ): Promise<'stored' | 'same' | 'other'>;
+};
+
+export type LockedSession = {
+  session: StoredSession;
+  messages: StoredMessage[];
+  workflow: WorkflowState;
+  appendMessage(input: {
+    businessId: string;
+    senderKind: 'user' | 'assistant' | 'system';
+    senderUserId: string | null;
+    body: string;
+  }): Promise<StoredMessage>;
+  saveWorkflow(state: WorkflowState): Promise<void>;
+  latestInteraction(): Promise<{
+    status: 'succeeded' | 'failed' | 'refused';
+    errorCode: string | null;
+  } | null>;
+};
+
+export type ClaimedTurnCommit = {
+  sessionId: string;
+  claimId: string;
+  workflow: WorkflowState;
+  outcome: WorkflowState['turnOutcome'];
+  businessId: string;
+  actorUserId: string;
+  reply: string;
+  interaction: {
+    purpose: string;
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    latencyMs: number;
+    status: 'succeeded' | 'failed' | 'refused';
+    errorCode: string | null;
+  };
 };
 
 export function createPrismaAssistantRepository(prisma: PrismaClient): AssistantRepository {
@@ -144,12 +194,28 @@ export function createPrismaAssistantRepository(prisma: PrismaClient): Assistant
     },
 
     async saveWorkflow(sessionId, state, appointmentId) {
-      await prisma.chatSession.update({
-        where: { id: sessionId },
-        data: {
-          workflowState: state as Prisma.InputJsonValue,
-          ...(appointmentId !== undefined ? { appointmentId } : {}),
-        },
+      return prisma.$transaction(async (tx) => {
+        await lockSession(tx, sessionId);
+        const session = await tx.chatSession.findUnique({
+          where: { id: sessionId },
+          select: { workflowState: true },
+        });
+        if (!session) {
+          throw new NotFoundError('That conversation was not found.');
+        }
+        const current = readWorkflow(session.workflowState);
+        if (current.revision !== state.revision) {
+          return 'stale' as const;
+        }
+        const next: WorkflowState = { ...state, revision: current.revision + 1 };
+        await tx.chatSession.update({
+          where: { id: sessionId },
+          data: {
+            workflowState: next as Prisma.InputJsonValue,
+            ...(appointmentId !== undefined ? { appointmentId } : {}),
+          },
+        });
+        return 'stored' as const;
       });
     },
 
@@ -169,7 +235,186 @@ export function createPrismaAssistantRepository(prisma: PrismaClient): Assistant
         },
       });
     },
+
+    async latestInteraction(sessionId) {
+      const row = await prisma.aiInteraction.findFirst({
+        where: { chatSessionId: sessionId },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true, errorCode: true },
+      });
+      return row;
+    },
+
+    async withLockedSession(sessionId, messageLimit, run) {
+      return prisma.$transaction(async (tx) => {
+        await lockSession(tx, sessionId);
+        const session = await tx.chatSession.findUnique({
+          where: { id: sessionId },
+          select: sessionSelect,
+        });
+        if (!session) {
+          throw new NotFoundError('That conversation was not found.');
+        }
+        const messages = await listMessages(tx, sessionId, messageLimit);
+        let workflow = readWorkflow(session.workflowState);
+        const locked: LockedSession = {
+          session,
+          messages,
+          get workflow() {
+            return workflow;
+          },
+          async appendMessage(input) {
+            const message = await tx.chatMessage.create({
+              data: {
+                businessId: input.businessId,
+                sessionId,
+                senderKind: input.senderKind,
+                senderUserId: input.senderUserId,
+                body: input.body,
+              },
+              select: messageSelect,
+            });
+            messages.push(message);
+            return message;
+          },
+          async saveWorkflow(state) {
+            const next: WorkflowState = { ...state, revision: workflow.revision + 1 };
+            workflow = next;
+            await tx.chatSession.update({
+              where: { id: sessionId },
+              data: { workflowState: next as Prisma.InputJsonValue },
+            });
+          },
+          async latestInteraction() {
+            return tx.aiInteraction.findFirst({
+              where: { chatSessionId: sessionId },
+              orderBy: { createdAt: 'desc' },
+              select: { status: true, errorCode: true },
+            });
+          },
+        };
+        return run(locked);
+      });
+    },
+
+    async commitClaimedTurn(input) {
+      return prisma.$transaction(async (tx) => {
+        await lockSession(tx, input.sessionId);
+        const session = await tx.chatSession.findUnique({
+          where: { id: input.sessionId },
+          select: { workflowState: true },
+        });
+        const stored = session ? readWorkflow(session.workflowState) : null;
+        if (!stored || stored.turnClaim !== input.claimId) {
+          return 'lost' as const;
+        }
+        await tx.chatMessage.create({
+          data: {
+            businessId: input.businessId,
+            sessionId: input.sessionId,
+            senderKind: 'assistant',
+            senderUserId: null,
+            body: input.reply,
+          },
+        });
+        await tx.aiInteraction.create({
+          data: {
+            businessId: input.businessId,
+            actorUserId: input.actorUserId,
+            chatSessionId: input.sessionId,
+            purpose: input.interaction.purpose,
+            model: input.interaction.model,
+            promptTokens: input.interaction.promptTokens,
+            completionTokens: input.interaction.completionTokens,
+            latencyMs: input.interaction.latencyMs,
+            status: input.interaction.status,
+            errorCode: input.interaction.errorCode,
+          },
+        });
+        const base = stored.revision === input.workflow.revision ? input.workflow : stored;
+        const workflow: WorkflowState = {
+          ...base,
+          turnKey: input.workflow.turnKey,
+          turnClaim: null,
+          turnClaimedAt: null,
+          turnSettled: true,
+          turnOutcome: input.outcome,
+          revision: stored.revision + 1,
+        };
+        await tx.chatSession.update({
+          where: { id: input.sessionId },
+          data: { workflowState: workflow as Prisma.InputJsonValue },
+        });
+        return 'stored' as const;
+      });
+    },
+
+    async completeConfirmedWorkflow(sessionId, appointmentId) {
+      return prisma.$transaction(async (tx) => {
+        await lockSession(tx, sessionId);
+        const session = await tx.chatSession.findUnique({
+          where: { id: sessionId },
+          select: { workflowState: true },
+        });
+        if (!session) {
+          throw new NotFoundError('That conversation was not found.');
+        }
+        const current = readWorkflow(session.workflowState);
+        if (current.phase === 'completed' && current.appointmentId === appointmentId) {
+          return 'same' as const;
+        }
+        if (
+          current.phase === 'completed' &&
+          current.appointmentId &&
+          current.appointmentId !== appointmentId
+        ) {
+          return 'other' as const;
+        }
+        const next: WorkflowState = {
+          ...current,
+          phase: 'completed',
+          appointmentId,
+          confirmationState: 'not_required',
+          selectedSlot: null,
+          offeredSlots: [],
+          revision: current.revision + 1,
+        };
+        await tx.chatSession.update({
+          where: { id: sessionId },
+          data: {
+            workflowState: next as Prisma.InputJsonValue,
+            appointmentId,
+          },
+        });
+        return 'stored' as const;
+      });
+    },
   };
+}
+
+const messageSelect = {
+  id: true,
+  senderKind: true,
+  body: true,
+  createdAt: true,
+} as const;
+
+function lockSession(tx: Prisma.TransactionClient, sessionId: string) {
+  return tx.$queryRaw`SELECT "id" FROM "chat_sessions" WHERE "id" = CAST(${sessionId} AS uuid) FOR UPDATE`;
+}
+
+async function listMessages(
+  prisma: Prisma.TransactionClient | PrismaClient,
+  sessionId: string,
+  limit: number,
+) {
+  const rows = await prisma.chatMessage.findMany({
+    where: { sessionId },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    select: messageSelect,
+  });
+  return rows.reverse();
 }
 
 const sessionSelect = {

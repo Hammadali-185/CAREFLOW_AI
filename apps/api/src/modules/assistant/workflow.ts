@@ -16,6 +16,12 @@ export function emptyWorkflow(): WorkflowState {
     selectedSlot: null,
     missingFields: [],
     confirmationState: 'not_required',
+    turnKey: null,
+    turnClaim: null,
+    turnClaimedAt: null,
+    turnSettled: false,
+    turnOutcome: null,
+    revision: 0,
   };
 }
 

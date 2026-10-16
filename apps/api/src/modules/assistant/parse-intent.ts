@@ -20,14 +20,21 @@ export function parseModelIntent(
     return { ok: false };
   }
 
-  const parsed = modelIntentSchema.safeParse({
+  const topic = emptyToNull(record.topic);
+  const candidate: Record<string, unknown> = {
     ...record,
     serviceQuery: emptyToNull(record.serviceQuery),
     datePreference: emptyToNull(record.datePreference),
     timePreference: emptyToNull(record.timePreference),
     staffQuery: emptyToNull(record.staffQuery),
     clarificationQuestion: emptyToNull(record.clarificationQuestion),
-  });
+  };
+  if (topic === undefined || topic === null || topic === '') {
+    delete candidate.topic;
+  } else {
+    candidate.topic = topic;
+  }
+  const parsed = modelIntentSchema.safeParse(candidate);
   return parsed.success ? { ok: true, intent: parsed.data } : { ok: false };
 }
 
